@@ -48,10 +48,16 @@ interface StreamingState {
     outputPos: number;
 }
 
+let preloadedSession: InferenceSession | null = null;
+let preloadedModelUrl: string | null = null;
+let preloadedProvider: string | null = null;
+let preloadedStreamingState: StreamingState | null = null;
+
 let streamingState: StreamingState | null = null;
 let taskQueue = Promise.resolve();
 
 type WorkerMessage = 
+  | { type: 'preload'; data: { modelUrl: string; provider?: string } }
   | { type: 'stream_start'; data: { modelUrl: string; provider?: string; sampleRate: number } }
   | { type: 'stream_data'; data: { chL: Float32Array; chR: Float32Array } }
   | { type: 'stream_end'; data?: never };
@@ -64,10 +70,48 @@ self.addEventListener('message', (e: MessageEvent) => {
         const { type } = msg;
 
         try {
-            if (type === 'stream_start') {
+            if (type === 'preload') {
+                const { modelUrl, provider } = msg.data;
+                console.log('[Worker] 收到 preload, 模型:', modelUrl, 'Provider:', provider || 'wasm');
+                
+                // 如果已经加载了相同的模型和 provider，直接返回
+                if (preloadedSession && preloadedModelUrl === modelUrl && preloadedProvider === (provider || 'wasm')) {
+                    console.log('[Worker] 模型已预加载，跳过');
+                    self.postMessage({ type: 'preloaded' });
+                    return;
+                }
+
+                preloadedSession = await createSession(modelUrl, provider);
+                preloadedModelUrl = modelUrl;
+                preloadedProvider = provider || 'wasm';
+                
+                // 预先初始化流状态（预分配缓冲区和计算窗函数）
+                console.log('[Worker] 正在预分配缓冲区和计算窗函数...');
+                preloadedStreamingState = await initStreamingWithSession(preloadedSession, { sampleRate: 44100 }); // sampleRate 暂时没用，传个默认值
+
+                self.postMessage({ type: 'preloaded' });
+                console.log('[Worker] 预加载完成');
+            } else if (type === 'stream_start') {
                 console.log('[Worker] 收到 stream_start, 模型:', msg.data.modelUrl, 'Provider:', msg.data.provider || 'wasm');
-                streamingState = await initStreaming(msg.data);
-                self.postMessage({ type: 'stream_started' });
+                
+                // 检查是否可以使用预加载的 session 和已分配好的状态
+                if (preloadedStreamingState && preloadedModelUrl === msg.data.modelUrl && preloadedProvider === (msg.data.provider || 'wasm')) {
+                    console.log('[Worker] 使用预加载的状态并重置指针');
+                    streamingState = resetStreamingState(preloadedStreamingState);
+                } else {
+                    console.log('[Worker] 未命中预加载或配置变更，重新初始化');
+                    streamingState = await initStreaming(msg.data);
+                }
+                
+                self.postMessage({
+                    type: 'stream_started',
+                    data: {
+                        nfft: streamingState.nfft,
+                        hop: streamingState.hop,
+                        chunkSize: streamingState.chunkSize,
+                        segStep: streamingState.segStep
+                    }
+                });
                 console.log('[Worker] 初始化完成');
             } else if (type === 'stream_data') {
                 if (!streamingState) throw new Error('Streaming not started');
@@ -98,27 +142,7 @@ self.addEventListener('message', (e: MessageEvent) => {
 console.log('[Worker] Worker Ready');
 self.postMessage({ type: 'worker_ready' });
 
-async function initStreaming(data: { modelUrl: string, provider?: string, sampleRate: number }): Promise<StreamingState> {
-    const { modelUrl, provider } = data;
-    
-    let dimF = 3072, dimT = 256, nfft = 6144, hop = 1024;
-    // Simple heuristic for model params based on name
-    // if (modelUrl.includes('9662') || (modelUrl.includes('Inst_3') && !modelUrl.includes('HQ')) || modelUrl.includes('KARA') || modelUrl.includes('Kim_Inst')) {
-    //     dimF = 2048;
-    //     nfft = 4096;
-    // }
-
-    const chunkSize = hop * (dimT - 1);
-    const segStep = chunkSize - nfft;
-    const win = hann(nfft);
-    const fadeIn = new Float32Array(nfft);
-    const fadeOut = new Float32Array(nfft);
-    for (let i = 0; i < nfft; i++) {
-        const w = 0.5 * (1 - Math.cos(Math.PI * i / (nfft - 1)));
-        fadeIn[i] = w;
-        fadeOut[i] = 1 - w;
-    }
-
+async function createSession(modelUrl: string, provider?: string): Promise<InferenceSession> {
     let providerUsed = provider || 'wasm';
     
     // WebGPU Check
@@ -141,10 +165,35 @@ async function initStreaming(data: { modelUrl: string, provider?: string, sample
         }
     }
 
-    const session = await ort.InferenceSession.create(modelUrl, {
+    return await ort.InferenceSession.create(modelUrl, {
         executionProviders: [providerUsed]
     });
-    
+}
+
+async function initStreaming(data: { modelUrl: string, provider?: string, sampleRate: number }): Promise<StreamingState> {
+    const session = await createSession(data.modelUrl, data.provider);
+    return initStreamingWithSession(session, data);
+}
+
+async function initStreamingWithSession(session: InferenceSession, data: { sampleRate: number }): Promise<StreamingState> {
+    let dimF = 3072, dimT = 256, nfft = 6144, hop = 1024;
+    // Simple heuristic for model params based on name
+    // if (modelUrl.includes('9662') || (modelUrl.includes('Inst_3') && !modelUrl.includes('HQ')) || modelUrl.includes('KARA') || modelUrl.includes('Kim_Inst')) {
+    //     dimF = 2048;
+    //     nfft = 4096;
+    // }
+
+    const chunkSize = hop * (dimT - 1);
+    const segStep = chunkSize - nfft;
+    const win = hann(nfft);
+    const fadeIn = new Float32Array(nfft);
+    const fadeOut = new Float32Array(nfft);
+    for (let i = 0; i < nfft; i++) {
+        const w = 0.5 * (1 - Math.cos(Math.PI * i / (nfft - 1)));
+        fadeIn[i] = w;
+        fadeOut[i] = 1 - w;
+    }
+
     const inputName = session.inputNames ? session.inputNames[0] : 'input';
 
     const maxBufferSize = 1024 * 1024 * 10; // 10MB buffer roughly
@@ -346,4 +395,19 @@ async function flushStream(state: StreamingState) {
     if (pendingLen > 0) {
         emitStreamResult(state, pendingLen);
     }
+}
+
+function resetStreamingState(state: StreamingState): StreamingState {
+    const padding = state.nfft;
+    state.inputBufferL.fill(0);
+    state.inputBufferR.fill(0);
+    state.inputBufferWritePos = padding;
+    
+    state.outputBufferL.fill(0);
+    state.outputBufferR.fill(0);
+    state.normBuffer.fill(0);
+    
+    state.processedPos = 0;
+    state.outputPos = padding;
+    return state;
 }

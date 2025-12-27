@@ -14,7 +14,8 @@ const availableModels = [
 ];
 
 const selectedModel = ref(availableModels[0]);
-const selectedProvider = ref<'wasm' | 'webgpu'>('wasm');
+const selectedProvider = ref<'wasm' | 'webgpu'>('webgpu');
+const workerCount = ref(3);
 const customModelUrl = ref('');
 const useCustomUrl = ref(false);
 
@@ -38,7 +39,8 @@ onMounted(async () => {
     uar = new UAR({
       modelUrl: modelUrl.value,
       workerUrl: workerUrl,
-      provider: selectedProvider.value
+      provider: selectedProvider.value,
+      workerCount: workerCount.value
     });
     status.value = '正在预初始化...';
     await uar.init();
@@ -68,6 +70,12 @@ const startProcessing = async () => {
     return;
   }
 
+  // 验证 workerCount
+  if (workerCount.value < 1) {
+    alert('Worker 数量至少为 1');
+    return;
+  }
+
   isProcessing.value = true;
   status.value = '处理中...';
 
@@ -78,17 +86,24 @@ const startProcessing = async () => {
       uar = new UAR({
         modelUrl: modelUrl.value,
         workerUrl: workerUrl,
-        provider: selectedProvider.value
+        provider: selectedProvider.value,
+        workerCount: workerCount.value
       });
       await uar.init();
     } else {
-      // 检查模型 URL 是否变化
-      if (uar.options.modelUrl !== modelUrl.value || uar.options.provider !== selectedProvider.value) {
-        console.log('[Demo] 检测到模型或 Provider 变化，重新创建实例');
+      // 检查配置是否变化
+      if (
+        uar.options.modelUrl !== modelUrl.value || 
+        uar.options.provider !== selectedProvider.value ||
+        uar.options.workerCount !== workerCount.value
+      ) {
+        console.log('[Demo] 检测到配置变化，重新创建实例');
+        uar.destroy(); // 销毁旧实例
         uar = new UAR({
           modelUrl: modelUrl.value,
           workerUrl: workerUrl,
-          provider: selectedProvider.value
+          provider: selectedProvider.value,
+          workerCount: workerCount.value
         });
         await uar.init();
       }
@@ -162,6 +177,15 @@ const playStream = async (stream: ReadableStream<Float32Array>) => {
     reader.releaseLock();
   }
 };
+
+const handleDestroy = () => {
+  if (uar) {
+    uar.destroy();
+    uar = null;
+    status.value = '实例已销毁';
+    console.log('[Demo] 实例已销毁');
+  }
+};
 </script>
 
 <template>
@@ -187,6 +211,11 @@ const playStream = async (stream: ReadableStream<Float32Array>) => {
       </div>
 
       <div class="form-group">
+        <label>Worker 数量:</label>
+        <input type="number" v-model.number="workerCount" min="1" max="16" />
+      </div>
+
+      <div class="form-group">
         <label>
           <input type="checkbox" v-model="useCustomUrl" /> 使用自定义模型 URL
         </label>
@@ -204,6 +233,9 @@ const playStream = async (stream: ReadableStream<Float32Array>) => {
       <div class="actions">
         <button @click="startProcessing" :disabled="isProcessing">
           {{ isProcessing ? '处理中...' : '开始处理' }}
+        </button>
+        <button @click="handleDestroy" :disabled="isProcessing" class="destroy-btn">
+          销毁实例
         </button>
       </div>
     </div>
@@ -243,7 +275,7 @@ const playStream = async (stream: ReadableStream<Float32Array>) => {
   gap: 0.5em;
 }
 
-select, input[type="text"] {
+select, input[type="text"], input[type="number"] {
   padding: 0.5em;
   width: 300px;
   border: 1px solid #ccc;
@@ -271,5 +303,15 @@ button:hover:not(:disabled) {
 button:disabled {
   opacity: 0.5;
   cursor: not-allowed;
+}
+
+.destroy-btn {
+  background-color: #d32f2f;
+  margin-left: 10px;
+}
+
+.destroy-btn:hover:not(:disabled) {
+  background-color: #b71c1c;
+  border-color: #ef5350;
 }
 </style>

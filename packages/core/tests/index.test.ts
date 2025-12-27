@@ -5,3 +5,159 @@ test('UAR instantiation', () => {
   const uar = new UAR({ modelUrl: 'model.onnx', workerUrl: 'worker.js' });
   expect(uar).toBeDefined();
 })
+
+type MessageListener = (event: MessageEvent) => void
+
+interface WorkerLike {
+  addEventListener(type: 'message', listener: MessageListener): void
+  removeEventListener(type: 'message', listener: MessageListener): void
+  postMessage(message: unknown, transfer?: Transferable[]): void
+  terminate(): void
+}
+
+type IncomingMessage =
+  | { type: 'stream_start'; data: { modelUrl: string; provider?: string; sampleRate: number } }
+  | { type: 'stream_data'; data: { chL: Float32Array; chR: Float32Array } }
+  | { type: 'stream_end'; data?: never }
+
+type OutgoingMessage =
+  | { type: 'stream_started'; data: { nfft: number; hop: number; chunkSize: number; segStep: number } }
+  | { type: 'stream_result'; data: { chL: Float32Array; chR: Float32Array } }
+  | { type: 'stream_ended' }
+  | { type: 'error'; error: string }
+
+function concatFloat32Arrays(chunks: readonly Float32Array[]): Float32Array {
+  let total = 0
+  for (const chunk of chunks) total += chunk.length
+  const out = new Float32Array(total)
+  let offset = 0
+  for (const chunk of chunks) {
+    out.set(chunk, offset)
+    offset += chunk.length
+  }
+  return out
+}
+
+class FakeWorker implements WorkerLike {
+  private readonly listeners = new Set<MessageListener>()
+  private readonly receivedL: Float32Array[] = []
+  private readonly receivedR: Float32Array[] = []
+  private readonly deferResults: boolean
+
+  public constructor(options: { deferResults: boolean }) {
+    this.deferResults = options.deferResults
+  }
+
+  public addEventListener(type: 'message', listener: MessageListener): void {
+    if (type !== 'message') return
+    this.listeners.add(listener)
+  }
+
+  public removeEventListener(type: 'message', listener: MessageListener): void {
+    if (type !== 'message') return
+    this.listeners.delete(listener)
+  }
+
+  public postMessage(message: unknown, _transfer?: Transferable[]): void {
+    const msg = message as IncomingMessage
+    if (msg.type === 'stream_start') {
+      const started: OutgoingMessage = {
+        type: 'stream_started',
+        data: { nfft: 1, hop: 1, chunkSize: 4, segStep: 3 }
+      }
+      this.emit(started)
+      return
+    }
+    if (msg.type === 'stream_data') {
+      this.receivedL.push(msg.data.chL)
+      this.receivedR.push(msg.data.chR)
+      return
+    }
+    if (msg.type === 'stream_end') {
+      const emitAll = () => {
+        const allL = concatFloat32Arrays(this.receivedL)
+        const allR = concatFloat32Arrays(this.receivedR)
+
+        const cut = Math.min(3, allL.length)
+        if (cut > 0) {
+          this.emit({ type: 'stream_result', data: { chL: allL.slice(0, cut), chR: allR.slice(0, cut) } })
+        }
+        if (allL.length > cut) {
+          this.emit({ type: 'stream_result', data: { chL: allL.slice(cut), chR: allR.slice(cut) } })
+        }
+        this.emit({ type: 'stream_ended' })
+      }
+
+      if (this.deferResults) {
+        queueMicrotask(emitAll)
+      } else {
+        emitAll()
+      }
+    }
+  }
+
+  public terminate(): void {
+    this.listeners.clear()
+  }
+
+  private emit(message: OutgoingMessage): void {
+    const event = { data: message } as MessageEvent
+    for (const listener of this.listeners) {
+      listener(event)
+    }
+  }
+}
+
+test('多 worker 分段合并保持顺序与边界', async () => {
+  const sampleCount = 20
+  const chL = new Float32Array(sampleCount)
+  const chR = new Float32Array(sampleCount)
+  for (let i = 0; i < sampleCount; i++) {
+    chL[i] = i
+    chR[i] = 1000 + i
+  }
+
+  const worker0 = new FakeWorker({ deferResults: true })
+  const worker1 = new FakeWorker({ deferResults: false })
+
+  const uar = new UAR({ modelUrl: 'model.onnx', workerUrl: 'worker.js', workerCount: 2 })
+  ;(uar as unknown as { workers: Worker[] }).workers = [
+    worker0 as unknown as Worker,
+    worker1 as unknown as Worker
+  ]
+
+  const received: Float32Array[] = []
+  const controller = {
+    enqueue(chunk: Float32Array) {
+      received.push(chunk)
+    },
+    close() {},
+    error(err: unknown) {
+      throw err instanceof Error ? err : new Error(String(err))
+    }
+  }
+
+  type RunParallelStream = (
+    left: Float32Array,
+    right: Float32Array,
+    sampleRate: number,
+    controller: ReadableStreamDefaultController<Float32Array>
+  ) => Promise<void>
+
+  const runParallelStream = (uar as unknown as { runParallelStream: RunParallelStream }).runParallelStream
+  await runParallelStream.call(
+    uar,
+    chL,
+    chR,
+    44100,
+    controller as unknown as ReadableStreamDefaultController<Float32Array>
+  )
+
+  const out = concatFloat32Arrays(received)
+  expect(out.length).toBe(sampleCount * 2)
+
+  for (let i = 0; i < sampleCount; i++) {
+    expect(out[i * 2]).toBe(chL[i])
+    expect(out[i * 2 + 1]).toBe(chR[i])
+  }
+})

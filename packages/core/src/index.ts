@@ -1,23 +1,27 @@
+
 export class UAR {
   options: {
     modelUrl: string;
     workerUrl: string;
     provider?: 'wasm' | 'webgpu';
+    workerCount?: number;
   };
 
   private status: 'UNINITIALIZED' | 'FREE' | 'BUSY' = 'UNINITIALIZED';
-  private worker: Worker | null = null;
+  private workers: Worker[] = [];
   private initPromise: Promise<void> | null = null;
-
-  private resolveStreamStart: (() => void) | null = null;
-  private rejectStreamStart: ((err: Error) => void) | null = null;
+  private audioCtx: AudioContext | null = null;
 
   public constructor(options: {
     modelUrl: string;
     workerUrl: string;
     provider?: 'wasm' | 'webgpu';
+    workerCount?: number;
   }) {
-    this.options = options;
+    this.options = {
+      ...options,
+      workerCount: options.workerCount || 1
+    };
   }
 
   public async init() {
@@ -26,56 +30,98 @@ export class UAR {
     }
 
     this.initPromise = (async () => {
-      if (this.worker) {
+      if (this.workers.length > 0) {
         return;
       }
 
-      console.log('[UAR] 正在创建 Worker...', this.options.workerUrl);
-      this.worker = new Worker(this.options.workerUrl, { type: 'module' });
+      const count = this.options.workerCount || 1;
+      console.log(`[UAR] 正在创建 ${count} 个 Worker...`, this.options.workerUrl);
 
-      // 等待 Worker 就绪
-      await new Promise<void>((resolve, reject) => {
-        const initHandler = (e: MessageEvent) => {
-          const { type, error } = e.data;
-          // console.log('[UAR] 收到 Worker 初始消息:', type);
-          if (type === 'worker_ready') {
-            console.log('[UAR] Worker 就绪');
-            // 移除临时的 initHandler，后面会设置通用的 handler
-            this.worker?.removeEventListener('message', initHandler);
-            resolve();
-          } else if (type === 'error') {
-             this.worker?.removeEventListener('message', initHandler);
-             reject(new Error(error || 'Worker init error'));
-          }
-        };
-        this.worker!.addEventListener('message', initHandler);
-      });
+      const promises: Promise<Worker>[] = [];
+      for (let i = 0; i < count; i++) {
+        promises.push(this.createWorker(i));
+      }
 
-      // 设置通用的握手消息处理器
-      this.worker.addEventListener('message', (e) => {
-        const { type, error } = e.data;
-        if (type === 'stream_started') {
-          if (this.resolveStreamStart) {
-            this.resolveStreamStart();
-            this.resolveStreamStart = null;
-            this.rejectStreamStart = null;
-          }
-        } else if (type === 'error') {
-          const err = new Error(error || 'Unknown worker error');
-          if (this.rejectStreamStart) {
-            this.rejectStreamStart(err);
-            this.resolveStreamStart = null;
-            this.rejectStreamStart = null;
-          } else {
-            console.error('[UAR] Worker 错误:', err);
-          }
+      try {
+        this.workers = await Promise.all(promises);
+      } catch (e) {
+        this.workers.forEach(w => w.terminate());
+        this.workers = [];
+        this.initPromise = null;
+        throw e;
+      }
+
+      // 预创建并启动 AudioContext 以热身（减少首次解码延迟）
+      if (!this.audioCtx) {
+        console.log('[UAR] 正在预创建 AudioContext...');
+        this.audioCtx = new AudioContext();
+        if (this.audioCtx.state === 'suspended') {
+            this.audioCtx.resume().catch(e => console.warn('[UAR] AudioContext resume failed during init:', e));
         }
-      });
+      }
 
       this.status = 'FREE';
     })();
 
     return this.initPromise;
+  }
+
+  private async createWorker(index: number): Promise<Worker> {
+    const worker = new Worker(this.options.workerUrl, { type: 'module' });
+
+    // 1. 等待 Worker 就绪
+    await new Promise<void>((resolve, reject) => {
+      const initHandler = (e: MessageEvent) => {
+        const { type, error } = e.data;
+        if (type === 'worker_ready') {
+          console.log(`[UAR] Worker ${index} 就绪`);
+          worker.removeEventListener('message', initHandler);
+          resolve();
+        } else if (type === 'error') {
+          worker.removeEventListener('message', initHandler);
+          reject(new Error(error || `Worker ${index} init error`));
+        }
+      };
+      worker.addEventListener('message', initHandler);
+    });
+
+    // 2. 预加载模型
+    console.log(`[UAR] Worker ${index} 正在预加载模型...`, this.options.modelUrl);
+    await new Promise<void>((resolve, reject) => {
+      const preloadHandler = (e: MessageEvent) => {
+        const { type, error } = e.data;
+        if (type === 'preloaded') {
+          worker.removeEventListener('message', preloadHandler);
+          resolve();
+        } else if (type === 'error') {
+          worker.removeEventListener('message', preloadHandler);
+          reject(new Error(error || `Worker ${index} preload error`));
+        }
+      };
+      worker.addEventListener('message', preloadHandler);
+
+      worker.postMessage({
+        type: 'preload',
+        data: {
+          modelUrl: this.options.modelUrl,
+          provider: this.options.provider
+        }
+      });
+    });
+
+    return worker;
+  }
+
+  public destroy() {
+    console.log('[UAR] Destroying...');
+    this.workers.forEach(w => w.terminate());
+    this.workers = [];
+    if (this.audioCtx) {
+      this.audioCtx.close().catch(console.error);
+      this.audioCtx = null;
+    }
+    this.status = 'UNINITIALIZED';
+    this.initPromise = null;
   }
 
   public process(AudioData: ArrayBuffer): ReadableStream<Float32Array> {
@@ -86,17 +132,24 @@ export class UAR {
     this.status = 'BUSY';
 
     let controller: ReadableStreamDefaultController<Float32Array>;
-    let audioCtx: AudioContext | null = null;
 
     return new ReadableStream<Float32Array>({
       start: async (c) => {
         controller = c;
         try {
-          if (!this.worker) {
+          if (this.workers.length === 0) {
             await this.init();
           }
 
-          audioCtx = new AudioContext();
+          if (!this.audioCtx) {
+            this.audioCtx = new AudioContext();
+          }
+          const audioCtx = this.audioCtx;
+          
+          if (audioCtx.state === 'suspended') {
+            await audioCtx.resume();
+          }
+
           console.log('[UAR] 解码音频数据...');
           const audioBuffer = await audioCtx.decodeAudioData(AudioData.slice(0));
           console.log('[UAR] 音频解码完成, 时长:', audioBuffer.duration, '采样率:', audioBuffer.sampleRate);
@@ -104,75 +157,13 @@ export class UAR {
           const chL = audioBuffer.getChannelData(0);
           const chR = audioBuffer.numberOfChannels > 1 ? audioBuffer.getChannelData(1) : chL;
 
-          // Handshake
-          console.log('[UAR] 发送 stream_start 到 Worker, provider:', this.options.provider || 'wasm');
-          await new Promise<void>((resolve, reject) => {
-            this.resolveStreamStart = resolve;
-            this.rejectStreamStart = reject;
-            this.worker!.postMessage({
-              type: 'stream_start',
-              data: {
-                modelUrl: this.options.modelUrl,
-                provider: this.options.provider,
-                sampleRate: audioBuffer.sampleRate
-              }
-            });
-          });
+          await this.runParallelStream(chL, chR, audioBuffer.sampleRate, controller);
 
-          // 设置流式数据的消息处理器
-          const streamHandler = (e: MessageEvent) => {
-            const { type, data, error } = e.data;
-            if (type === 'stream_result') {
-              const { chL, chR } = data;
-              // Interleave to stereo Float32Array
-              const len = chL.length;
-              const interleaved = new Float32Array(len * 2);
-              for (let i = 0; i < len; i++) {
-                interleaved[i * 2] = chL[i];
-                interleaved[i * 2 + 1] = chR[i];
-              }
-              controller.enqueue(interleaved);
-            } else if (type === 'stream_ended') {
-              console.log('[UAR] 流处理结束');
-              this.worker?.removeEventListener('message', streamHandler);
-              controller.close();
-              this.status = 'FREE';
-              if (audioCtx && audioCtx.state !== 'closed') audioCtx.close();
-            } else if (type === 'error') {
-              console.error('[UAR] Worker 运行时错误:', error);
-              this.worker?.removeEventListener('message', streamHandler);
-              controller.error(new Error(error));
-              this.status = 'FREE';
-              if (audioCtx && audioCtx.state !== 'closed') audioCtx.close();
-            }
-          };
-          this.worker!.addEventListener('message', streamHandler);
-
-          // Send data in chunks
-          const chunkSize = 16384; // 较小的 chunk size 以便更流畅地流式处理
-          let offset = 0;
-          console.log('[UAR] 开始发送音频 chunk 到 Worker...');
-          while (offset < chL.length) {
-            const end = Math.min(offset + chunkSize, chL.length);
-            const subL = chL.slice(offset, end);
-            const subR = chR.slice(offset, end);
-
-            this.worker!.postMessage({
-              type: 'stream_data',
-              data: { chL: subL, chR: subR }
-            }, [subL.buffer, subR.buffer]);
-
-            offset = end;
-          }
-
-          console.log('[UAR] 所有数据已发送, 发送 stream_end');
-          this.worker!.postMessage({ type: 'stream_end' });
         } catch (err: unknown) {
           const error = err instanceof Error ? err : new Error(String(err));
           console.error('[UAR] 处理过程出错:', error);
           controller.error(error);
           this.status = 'FREE';
-          if (audioCtx && audioCtx.state !== 'closed') audioCtx.close();
         }
       }
     });
@@ -195,78 +186,12 @@ export class UAR {
       start: async (c) => {
         controller = c;
         try {
-          if (!this.worker) {
+          if (this.workers.length === 0) {
             await this.init();
           }
 
-          // Handshake
-          console.log('[UAR] 发送 stream_start 到 Worker, provider:', this.options.provider || 'wasm');
-          await new Promise<void>((resolve, reject) => {
-            this.resolveStreamStart = resolve;
-            this.rejectStreamStart = reject;
-            this.worker!.postMessage({
-              type: 'stream_start',
-              data: {
-                modelUrl: this.options.modelUrl,
-                provider: this.options.provider,
-                sampleRate: sampleRate
-              }
-            });
-          });
+          await this.runParallelStream(chL, chR, sampleRate, controller);
 
-          // Override onmessage for streaming data
-          this.worker!.onmessage = (e) => {
-            const { type, data, error } = e.data;
-            if (type === 'stream_result') {
-              const { chL: resL, chR: resR } = data;
-              const len = resL.length;
-              
-              // 检查数据是否有振幅
-              let maxAmp = 0;
-              for (let i = 0; i < len; i++) {
-                  maxAmp = Math.max(maxAmp, Math.abs(resL[i]), Math.abs(resR[i]));
-              }
-              if (maxAmp === 0) {
-                  // console.warn('[UAR] 收到全零音频块');
-              } else {
-                  // console.log('[UAR] 收到有效音频块, 最大振幅:', maxAmp.toFixed(6));
-              }
-
-              const interleaved = new Float32Array(len * 2);
-              for (let i = 0; i < len; i++) {
-                interleaved[i * 2] = resL[i];
-                interleaved[i * 2 + 1] = resR[i];
-              }
-              controller.enqueue(interleaved);
-            } else if (type === 'stream_ended') {
-              console.log('[UAR] 流处理结束');
-              controller.close();
-              this.status = 'FREE';
-            } else if (type === 'error') {
-              console.error('[UAR] Worker 运行时错误:', error);
-              controller.error(new Error(error));
-              this.status = 'FREE';
-            }
-          };
-
-          // Send data in chunks
-          const chunkSize = 16384;
-          let offset = 0;
-          while (offset < chL.length) {
-            const end = Math.min(offset + chunkSize, chL.length);
-            const subL = chL.slice(offset, end);
-            const subR = chR.slice(offset, end);
-
-            this.worker!.postMessage({
-              type: 'stream_data',
-              data: { chL: subL, chR: subR }
-            }, [subL.buffer, subR.buffer]);
-
-            offset = end;
-          }
-
-          console.log('[UAR] 所有数据已发送, 发送 stream_end');
-          this.worker!.postMessage({ type: 'stream_end' });
         } catch (err: unknown) {
           const error = err instanceof Error ? err : new Error(String(err));
           console.error('[UAR] 处理过程出错:', error);
@@ -275,6 +200,338 @@ export class UAR {
         }
       }
     });
+  }
+
+  private async runParallelStream(
+    chL: Float32Array,
+    chR: Float32Array,
+    sampleRate: number,
+    controller: ReadableStreamDefaultController<Float32Array>
+  ) {
+    const workerCount = this.workers.length;
+    console.log(`[UAR] 使用 ${workerCount} 个 Worker 处理`);
+
+    if (workerCount <= 1) {
+      await this.runSingleWorkerStream(chL, chR, sampleRate, controller);
+      return;
+    }
+
+    await this.runMultiWorkerSegmentedStream(chL, chR, sampleRate, controller);
+  }
+
+  private async runSingleWorkerStream(
+    chL: Float32Array,
+    chR: Float32Array,
+    sampleRate: number,
+    controller: ReadableStreamDefaultController<Float32Array>
+  ) {
+    const worker = this.workers[0];
+
+    await new Promise<void>((resolve, reject) => {
+      const startHandler = (e: MessageEvent) => {
+        const payload = e.data as unknown;
+        const type = this.getMessageType(payload);
+        if (type === 'stream_started') {
+          worker.removeEventListener('message', startHandler);
+          resolve();
+          return;
+        }
+        if (type === 'error') {
+          worker.removeEventListener('message', startHandler);
+          reject(new Error(this.getMessageError(payload) || 'Worker stream_start error'));
+        }
+      };
+      worker.addEventListener('message', startHandler);
+      worker.postMessage({
+        type: 'stream_start',
+        data: {
+          modelUrl: this.options.modelUrl,
+          provider: this.options.provider,
+          sampleRate
+        }
+      });
+    });
+
+    const finished = new Promise<void>((resolve, reject) => {
+      const streamHandler = (e: MessageEvent) => {
+        const payload = e.data as unknown;
+        const type = this.getMessageType(payload);
+        if (type === 'stream_result') {
+          const data = this.getStreamResultData(payload);
+          if (!data) return;
+
+          const len = data.chL.length;
+          const interleaved = new Float32Array(len * 2);
+          for (let i = 0; i < len; i++) {
+            interleaved[i * 2] = data.chL[i];
+            interleaved[i * 2 + 1] = data.chR[i];
+          }
+          controller.enqueue(interleaved);
+          return;
+        }
+        if (type === 'stream_ended') {
+          worker.removeEventListener('message', streamHandler);
+          resolve();
+          return;
+        }
+        if (type === 'error') {
+          worker.removeEventListener('message', streamHandler);
+          reject(new Error(this.getMessageError(payload) || 'Worker error'));
+        }
+      };
+      worker.addEventListener('message', streamHandler);
+    });
+
+    const postChunkSize = 16384;
+    for (let offset = 0; offset < chL.length; offset += postChunkSize) {
+      const end = Math.min(offset + postChunkSize, chL.length);
+      const subL = chL.slice(offset, end);
+      const subR = chR.slice(offset, end);
+      worker.postMessage({ type: 'stream_data', data: { chL: subL, chR: subR } }, [subL.buffer, subR.buffer]);
+    }
+
+    worker.postMessage({ type: 'stream_end' });
+
+    try {
+      await finished;
+      controller.close();
+      this.status = 'FREE';
+    } catch (err: unknown) {
+      controller.error(err instanceof Error ? err : new Error(String(err)));
+      this.status = 'FREE';
+    }
+  }
+
+  private async runMultiWorkerSegmentedStream(
+    chL: Float32Array,
+    chR: Float32Array,
+    sampleRate: number,
+    controller: ReadableStreamDefaultController<Float32Array>
+  ) {
+    const workerCount = this.workers.length;
+    let streamParams: { nfft: number; chunkSize: number; segStep: number } | null = null;
+
+    const startPromises = this.workers.map((worker, index) => {
+      return new Promise<void>((resolve, reject) => {
+        const startHandler = (e: MessageEvent) => {
+          const payload = e.data as unknown;
+          const type = this.getMessageType(payload);
+          if (type === 'stream_started') {
+            const params = this.getStreamStartedData(payload);
+            if (!streamParams && params) {
+              streamParams = params;
+            }
+            worker.removeEventListener('message', startHandler);
+            resolve();
+            return;
+          }
+          if (type === 'error') {
+            worker.removeEventListener('message', startHandler);
+            reject(new Error(this.getMessageError(payload) || `Worker ${index} stream_start error`));
+          }
+        };
+        worker.addEventListener('message', startHandler);
+        worker.postMessage({
+          type: 'stream_start',
+          data: {
+            modelUrl: this.options.modelUrl,
+            provider: this.options.provider,
+            sampleRate
+          }
+        });
+      });
+    });
+
+    await Promise.all(startPromises);
+
+    const fallbackNfft = 6144;
+    const fallbackChunkSize = 1024 * 255;
+    const used = streamParams ?? {
+      nfft: fallbackNfft,
+      chunkSize: fallbackChunkSize,
+      segStep: fallbackChunkSize - fallbackNfft
+    };
+
+    const segStep = used.segStep;
+    const overlap = used.chunkSize;
+
+    const segments: Array<{ segmentIndex: number; segStart: number; segEnd: number; sendStart: number; sendEnd: number }> = [];
+    const totalLen = chL.length;
+    const totalSteps = Math.ceil(totalLen / segStep);
+    const stepsPerWorker = Math.ceil(totalSteps / workerCount);
+
+    for (let i = 0; i < workerCount; i++) {
+      const segStart = Math.min(totalLen, i * stepsPerWorker * segStep);
+      const segEnd = Math.min(totalLen, (i + 1) * stepsPerWorker * segStep);
+      const hasData = segEnd > segStart;
+      const sendStart = hasData ? Math.max(0, segStart - overlap) : segStart;
+      const sendEnd = hasData ? Math.min(totalLen, segEnd + overlap) : segStart;
+      segments.push({ segmentIndex: i, segStart, segEnd, sendStart, sendEnd });
+    }
+
+    let nextSegmentToOutput = 0;
+    const segmentBuffers = new Map<number, Float32Array[]>();
+    const segmentEnded = new Set<number>();
+    for (const segment of segments) {
+      segmentBuffers.set(segment.segmentIndex, []);
+    }
+
+    const flush = () => {
+      while (segmentBuffers.has(nextSegmentToOutput)) {
+        const buffer = segmentBuffers.get(nextSegmentToOutput);
+        if (buffer && buffer.length > 0) {
+          for (const chunk of buffer) controller.enqueue(chunk);
+          buffer.length = 0;
+        }
+
+        if (!segmentEnded.has(nextSegmentToOutput)) return;
+
+        segmentEnded.delete(nextSegmentToOutput);
+        segmentBuffers.delete(nextSegmentToOutput);
+        nextSegmentToOutput++;
+      }
+    };
+
+    const resultPromises = this.workers.map((worker, workerIndex) => {
+      const segment = segments[workerIndex];
+      const trimStartFrames = segment.segStart - segment.sendStart;
+      const keepFrames = segment.segEnd - segment.segStart;
+      let skipFrames = trimStartFrames;
+      let remainingFrames = keepFrames;
+
+      return new Promise<void>((resolve, reject) => {
+        const streamHandler = (e: MessageEvent) => {
+          const payload = e.data as unknown;
+          const type = this.getMessageType(payload);
+
+          if (type === 'stream_result') {
+            if (remainingFrames <= 0) return;
+            const data = this.getStreamResultData(payload);
+            if (!data) return;
+
+            const len = data.chL.length;
+            if (data.chR.length !== len) {
+              reject(new Error(`Worker ${workerIndex} 返回的左右声道长度不一致`));
+              worker.removeEventListener('message', streamHandler);
+              return;
+            }
+
+            const interleaved = new Float32Array(len * 2);
+            for (let i = 0; i < len; i++) {
+              interleaved[i * 2] = data.chL[i];
+              interleaved[i * 2 + 1] = data.chR[i];
+            }
+
+            const chunkFrames = len;
+            if (skipFrames >= chunkFrames) {
+              skipFrames -= chunkFrames;
+              return;
+            }
+
+            const startFrame = skipFrames;
+            skipFrames = 0;
+            const availableFrames = chunkFrames - startFrame;
+            const takeFrames = Math.min(availableFrames, remainingFrames);
+            remainingFrames -= takeFrames;
+
+            const start = startFrame * 2;
+            const end = start + takeFrames * 2;
+
+            const trimmed = new Float32Array(takeFrames * 2);
+            trimmed.set(interleaved.subarray(start, end));
+            if (segment.segmentIndex === nextSegmentToOutput) {
+              controller.enqueue(trimmed);
+            } else {
+              const buffer = segmentBuffers.get(segment.segmentIndex);
+              if (buffer) buffer.push(trimmed);
+            }
+            return;
+          }
+
+          if (type === 'stream_ended') {
+            worker.removeEventListener('message', streamHandler);
+            segmentEnded.add(segment.segmentIndex);
+            flush();
+            resolve();
+            return;
+          }
+
+          if (type === 'error') {
+            worker.removeEventListener('message', streamHandler);
+            reject(new Error(this.getMessageError(payload) || `Worker ${workerIndex} 运行时错误`));
+          }
+        };
+
+        worker.addEventListener('message', streamHandler);
+      });
+    });
+
+    const postChunkSize = 16384;
+
+    for (let workerIndex = 0; workerIndex < workerCount; workerIndex++) {
+      const segment = segments[workerIndex];
+      const worker = this.workers[workerIndex];
+      for (let offset = segment.sendStart; offset < segment.sendEnd; offset += postChunkSize) {
+        const end = Math.min(offset + postChunkSize, segment.sendEnd);
+        const subL = chL.slice(offset, end);
+        const subR = chR.slice(offset, end);
+        worker.postMessage({ type: 'stream_data', data: { chL: subL, chR: subR } }, [subL.buffer, subR.buffer]);
+      }
+    }
+
+    this.workers.forEach(w => w.postMessage({ type: 'stream_end' }));
+
+    try {
+      await Promise.all(resultPromises);
+      controller.close();
+      this.status = 'FREE';
+    } catch (err: unknown) {
+      controller.error(err instanceof Error ? err : new Error(String(err)));
+      this.status = 'FREE';
+    }
+  }
+
+  private getMessageType(payload: unknown): string | null {
+    if (typeof payload !== 'object' || payload === null) return null;
+    if (!('type' in payload)) return null;
+    const typeValue = (payload as { type?: unknown }).type;
+    return typeof typeValue === 'string' ? typeValue : null;
+  }
+
+  private getMessageError(payload: unknown): string | null {
+    if (typeof payload !== 'object' || payload === null) return null;
+    if (!('error' in payload)) return null;
+    const errorValue = (payload as { error?: unknown }).error;
+    return typeof errorValue === 'string' ? errorValue : null;
+  }
+
+  private getStreamStartedData(payload: unknown): { nfft: number; chunkSize: number; segStep: number } | null {
+    if (typeof payload !== 'object' || payload === null) return null;
+    if (!('data' in payload)) return null;
+    const dataValue = (payload as { data?: unknown }).data;
+    if (typeof dataValue !== 'object' || dataValue === null) return null;
+
+    const nfft = (dataValue as { nfft?: unknown }).nfft;
+    const chunkSize = (dataValue as { chunkSize?: unknown }).chunkSize;
+    const segStep = (dataValue as { segStep?: unknown }).segStep;
+
+    if (typeof nfft !== 'number' || !Number.isFinite(nfft)) return null;
+    if (typeof chunkSize !== 'number' || !Number.isFinite(chunkSize)) return null;
+    if (typeof segStep !== 'number' || !Number.isFinite(segStep)) return null;
+    if (nfft <= 0 || chunkSize <= 0 || segStep <= 0) return null;
+
+    return { nfft, chunkSize, segStep };
+  }
+
+  private getStreamResultData(payload: unknown): { chL: Float32Array; chR: Float32Array } | null {
+    if (typeof payload !== 'object' || payload === null) return null;
+    if (!('data' in payload)) return null;
+    const dataValue = (payload as { data?: unknown }).data;
+    if (typeof dataValue !== 'object' || dataValue === null) return null;
+    const chL = (dataValue as { chL?: unknown }).chL;
+    const chR = (dataValue as { chR?: unknown }).chR;
+    if (!(chL instanceof Float32Array) || !(chR instanceof Float32Array)) return null;
+    return { chL, chR };
   }
 }
 
