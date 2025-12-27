@@ -1,0 +1,19 @@
+{
+  "name": "@uar/fft",
+  "version": "1.0.0",
+  "main": "./dist/index.mjs",
+  "module": "./dist/index.mjs",
+  "types": "./dist/index.d.mts",
+  "exports": {
+    ".": "./dist/index.mjs",
+    "./package.json": "./package.json"
+  },
+  "scripts": {
+    "build": "tsdown",
+    "test": "vitest run"
+  },
+  "devDependencies": {
+    "tsdown": "^0.18.1",
+    "typescript": "^5.9.3"
+  }
+}

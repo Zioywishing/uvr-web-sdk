@@ -1,0 +1,21 @@
+{
+  "name": "uar-web-sdk",
+  "workspaces": [
+    "packages/*",
+    "demo-html"
+  ],
+  "type": "module",
+  "private": true,
+  "devDependencies": {
+    "@types/bun": "latest",
+    "@vitejs/plugin-vue": "^6.0.3",
+    "vite": "^7.3.0",
+    "vue-tsc": "^3.2.1"
+  },
+  "peerDependencies": {
+    "typescript": "^5"
+  },
+  "dependencies": {
+    "vue": "^3.5.26"
+  }
+}
