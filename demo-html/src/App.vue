@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed } from 'vue';
+import { ref, computed, onMounted } from 'vue';
 import { UAR } from 'uar-web-sdk';
 import workerUrl from 'uar-web-sdk/worker?worker&url';
 
@@ -32,6 +32,25 @@ const isProcessing = ref(false);
 let uar: UAR | null = null;
 let audioCtx: AudioContext | null = null;
 
+onMounted(async () => {
+  console.log('[Demo] 页面挂载，开始自动初始化...');
+  try {
+    uar = new UAR({
+      modelUrl: modelUrl.value,
+      workerUrl: workerUrl,
+      provider: selectedProvider.value
+    });
+    status.value = '正在预初始化...';
+    await uar.init();
+    status.value = '就绪 (已初始化)';
+    console.log('[Demo] 自动初始化完成');
+  } catch (err: unknown) {
+    console.error('[Demo] 自动初始化失败:', err);
+    const errorMessage = err instanceof Error ? err.message : String(err);
+    status.value = `初始化失败 - ${errorMessage}`;
+  }
+});
+
 const handleFileChange = (event: Event) => {
   const target = event.target as HTMLInputElement;
   if (target.files && target.files.length > 0) {
@@ -50,28 +69,29 @@ const startProcessing = async () => {
   }
 
   isProcessing.value = true;
-  status.value = '初始化中...';
+  status.value = '处理中...';
 
   try {
-    // 每次开始前重新初始化 UAR 以确保状态清洁，或者复用实例但需要处理状态
-    // 这里为了演示简单，如果已存在则复用，但在实际应用中可能需要更复杂的生命周期管理
+    // 如果 uar 已经初始化且模型 URL 没变，可以直接使用
+    // 这里为了简单，如果实例不存在则创建，如果存在则检查配置
     if (!uar) {
       uar = new UAR({
         modelUrl: modelUrl.value,
         workerUrl: workerUrl,
         provider: selectedProvider.value
       });
+      await uar.init();
     } else {
-        // 如果支持更换模型，可能需要重新创建 UAR 实例或调用特定方法
-        // 目前 UAR 实现似乎不支持动态更换模型，所以我们这里重新创建
-        // 注意：实际生产中应正确销毁旧实例（终止 worker 等）
-        // 由于 UAR 类目前没有 destroy 方法，我们暂且假设用户刷新页面或我们重新 new 一个
-        // 为了安全起见，这里我们简单的覆盖旧实例
+      // 检查模型 URL 是否变化
+      if (uar.options.modelUrl !== modelUrl.value || uar.options.provider !== selectedProvider.value) {
+        console.log('[Demo] 检测到模型或 Provider 变化，重新创建实例');
         uar = new UAR({
-            modelUrl: modelUrl.value,
-            workerUrl: workerUrl,
-            provider: selectedProvider.value
+          modelUrl: modelUrl.value,
+          workerUrl: workerUrl,
+          provider: selectedProvider.value
         });
+        await uar.init();
+      }
     }
 
     status.value = '读取音频...';

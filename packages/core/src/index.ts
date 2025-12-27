@@ -20,7 +20,7 @@ export class UAR {
     this.options = options;
   }
 
-  private async init() {
+  public async init() {
     if (this.initPromise) {
       return this.initPromise;
     }
