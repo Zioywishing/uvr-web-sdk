@@ -46,6 +46,13 @@ interface StreamingState {
     
     processedPos: number;
     outputPos: number;
+
+    // 新增对齐字段
+    sampleRate: number;
+    padSamples: number;
+    headFadeSamples: number;
+    totalReceived: number;
+    outputEmitted: number;
 }
 
 let preloadedSession: InferenceSession | null = null;
@@ -177,15 +184,16 @@ async function initStreaming(data: { modelUrl: string, provider?: string, sample
 
 async function initStreamingWithSession(session: InferenceSession, data: { sampleRate: number }): Promise<StreamingState> {
     let dimF = 3072, dimT = 256, nfft = 6144, hop = 1024;
-    // Simple heuristic for model params based on name
-    // if (modelUrl.includes('9662') || (modelUrl.includes('Inst_3') && !modelUrl.includes('HQ')) || modelUrl.includes('KARA') || modelUrl.includes('Kim_Inst')) {
-    //     dimF = 2048;
-    //     nfft = 4096;
-    // }
+    const sr = data.sampleRate || 44100;
 
     const chunkSize = hop * (dimT - 1);
     const segStep = chunkSize - nfft;
     const win = hann(nfft);
+
+    // 对齐 test-sep-web 的 padding 和 fade 逻辑
+    const padSamples = Math.max(0, Math.floor(0.4 * sr));
+    const headFadeSamples = Math.min(chunkSize, Math.max(1, Math.floor(0.015 * sr)));
+
     const fadeIn = new Float32Array(nfft);
     const fadeOut = new Float32Array(nfft);
     for (let i = 0; i < nfft; i++) {
@@ -197,7 +205,7 @@ async function initStreamingWithSession(session: InferenceSession, data: { sampl
     const inputName = session.inputNames ? session.inputNames[0] : 'input';
 
     const maxBufferSize = 1024 * 1024 * 10; // 10MB buffer roughly
-    const padding = nfft; 
+    const padding = padSamples; 
 
     return {
         session,
@@ -208,14 +216,20 @@ async function initStreamingWithSession(session: InferenceSession, data: { sampl
         
         inputBufferL: new Float32Array(maxBufferSize),
         inputBufferR: new Float32Array(maxBufferSize),
-        inputBufferWritePos: padding, // Start with padding
+        inputBufferWritePos: padding, // 使用 padSamples 作为起始偏移
         
         outputBufferL: new Float32Array(maxBufferSize),
         outputBufferR: new Float32Array(maxBufferSize),
         normBuffer: new Float32Array(maxBufferSize),
         
         processedPos: 0,
-        outputPos: padding
+        outputPos: padding,
+
+        sampleRate: sr,
+        padSamples,
+        headFadeSamples,
+        totalReceived: 0,
+        outputEmitted: 0
     };
 }
 
@@ -246,10 +260,11 @@ async function processStreamChunk(state: StreamingState, data: { chL: Float32Arr
     state.inputBufferL.set(chL, state.inputBufferWritePos);
     state.inputBufferR.set(chR, state.inputBufferWritePos);
     state.inputBufferWritePos += len;
+    state.totalReceived += len;
 
     const segExt = state.chunkSize + state.nfft;
     while (state.inputBufferWritePos - state.processedPos >= segExt) {
-        await processSegment(state, state.processedPos);
+        await processSegment(state, state.processedPos, false);
         state.processedPos += state.segStep;
         
         const safeOutputLen = state.processedPos - state.outputPos;
@@ -259,8 +274,8 @@ async function processStreamChunk(state: StreamingState, data: { chL: Float32Arr
     }
 }
 
-async function processSegment(state: StreamingState, pos: number) {
-    const { session, inputName, dimF, dimT, nfft, hop, win, fadeIn, fadeOut, chunkSize, segStep } = state;
+async function processSegment(state: StreamingState, pos: number, isLast: boolean) {
+    const { session, inputName, dimF, dimT, nfft, hop, win, fadeIn, fadeOut, chunkSize, headFadeSamples } = state;
     // console.log('[Worker] 处理片段, 位置:', pos);
     const segExt = chunkSize + nfft;
     
@@ -342,26 +357,29 @@ async function processSegment(state: StreamingState, pos: number) {
 
     const isFirst = pos === 0;
     const writeMax = segExt;
-    const headLen = isFirst ? Math.min(nfft, writeMax) : nfft; 
     
-    for (let i = 0; i < headLen; i++) {
+    // 对齐 head fade 逻辑
+    const actualHeadFade = isFirst ? headFadeSamples : nfft;
+    for (let i = 0; i < actualHeadFade; i++) {
         const bufIdx = (pos + i) % state.outputBufferL.length;
-        const w = fadeIn[i];
+        const w = fadeIn[Math.floor(i * (nfft - 1) / actualHeadFade)];
         state.outputBufferL[bufIdx] += segOutL[i] * w;
         state.outputBufferR[bufIdx] += segOutR[i] * w;
         state.normBuffer[bufIdx] += w;
     }
-    for (let i = headLen; i < Math.min(segStep, writeMax); i++) {
+    for (let i = actualHeadFade; i < Math.min(state.segStep, writeMax); i++) {
         const bufIdx = (pos + i) % state.outputBufferL.length;
         state.outputBufferL[bufIdx] += segOutL[i];
         state.outputBufferR[bufIdx] += segOutR[i];
         state.normBuffer[bufIdx] += 1;
     }
-    const tailLen = Math.min(nfft, Math.max(0, writeMax - segStep));
+
+    // 对齐 tail fade 逻辑：如果是最后一段，不进行淡出，保持 1.0 权重
+    const tailLen = Math.min(nfft, Math.max(0, writeMax - state.segStep));
     for (let j = 0; j < tailLen; j++) {
-        const i = segStep + j;
+        const i = state.segStep + j;
         const bufIdx = (pos + i) % state.outputBufferL.length;
-        const w = fadeOut[j];
+        const w = isLast ? 1.0 : fadeOut[j];
         state.outputBufferL[bufIdx] += segOutL[i] * w;
         state.outputBufferR[bufIdx] += segOutR[i] * w;
         state.normBuffer[bufIdx] += w;
@@ -369,10 +387,15 @@ async function processSegment(state: StreamingState, pos: number) {
 }
 
 function emitStreamResult(state: StreamingState, length: number) {
-    const outL = new Float32Array(length);
-    const outR = new Float32Array(length);
+    // 限制输出长度，不要超过实际收到的数据量
+    const remainingToEmit = state.totalReceived - state.outputEmitted;
+    const actualLen = Math.min(length, remainingToEmit);
+    if (actualLen <= 0) return;
+
+    const outL = new Float32Array(actualLen);
+    const outR = new Float32Array(actualLen);
     
-    for (let i = 0; i < length; i++) {
+    for (let i = 0; i < actualLen; i++) {
         const bufIdx = (state.outputPos + i) % state.outputBufferL.length;
         const d = state.normBuffer[bufIdx] || 1;
         outL[i] = state.outputBufferL[bufIdx] / d;
@@ -384,6 +407,8 @@ function emitStreamResult(state: StreamingState, length: number) {
     }
     
     state.outputPos += length;
+    state.outputEmitted += actualLen;
+
     self.postMessage({
         type: 'stream_result',
         data: { chL: outL, chR: outR }
@@ -398,7 +423,7 @@ async function flushStream(state: StreamingState) {
 }
 
 function resetStreamingState(state: StreamingState): StreamingState {
-    const padding = state.nfft;
+    const padding = state.padSamples;
     state.inputBufferL.fill(0);
     state.inputBufferR.fill(0);
     state.inputBufferWritePos = padding;
@@ -409,5 +434,8 @@ function resetStreamingState(state: StreamingState): StreamingState {
     
     state.processedPos = 0;
     state.outputPos = padding;
+    
+    state.totalReceived = 0;
+    state.outputEmitted = 0;
     return state;
 }

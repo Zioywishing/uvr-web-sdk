@@ -53,8 +53,8 @@ export class UAR {
 
       // 预创建并启动 AudioContext 以热身（减少首次解码延迟）
       if (!this.audioCtx) {
-        console.log('[UAR] 正在预创建 AudioContext...');
-        this.audioCtx = new AudioContext();
+        console.log('[UAR] 正在预创建 AudioContext (44100Hz)...');
+        this.audioCtx = new AudioContext({ sampleRate: 44100 });
         if (this.audioCtx.state === 'suspended') {
             this.audioCtx.resume().catch(e => console.warn('[UAR] AudioContext resume failed during init:', e));
         }
@@ -142,7 +142,7 @@ export class UAR {
           }
 
           if (!this.audioCtx) {
-            this.audioCtx = new AudioContext();
+            this.audioCtx = new AudioContext({ sampleRate: 44100 });
           }
           const audioCtx = this.audioCtx;
           
@@ -157,7 +157,17 @@ export class UAR {
           const chL = audioBuffer.getChannelData(0);
           const chR = audioBuffer.numberOfChannels > 1 ? audioBuffer.getChannelData(1) : chL;
 
-          await this.runParallelStream(chL, chR, audioBuffer.sampleRate, controller);
+          // 对齐采样率：如果不是 44100，进行重采样
+          let finalChL = chL;
+          let finalChR = chR;
+          if (audioBuffer.sampleRate !== 44100) {
+            console.log(`[UAR] 采样率不匹配 (${audioBuffer.sampleRate} -> 44100), 正在重采样...`);
+            const resampled = await this.resampleChannelsTo44100(chL, chR, audioBuffer.sampleRate);
+            finalChL = resampled.chL as any;
+            finalChR = resampled.chR as any;
+          }
+
+          await this.runParallelStream(finalChL, finalChR, 44100, controller);
 
         } catch (err: unknown) {
           const error = err instanceof Error ? err : new Error(String(err));
@@ -190,7 +200,16 @@ export class UAR {
             await this.init();
           }
 
-          await this.runParallelStream(chL, chR, sampleRate, controller);
+          let finalChL = chL;
+          let finalChR = chR;
+          if (sampleRate !== 44100) {
+            console.log(`[UAR] 输入采样率不匹配 (${sampleRate} -> 44100), 正在重采样...`);
+            const resampled = await this.resampleChannelsTo44100(chL, chR, sampleRate);
+            finalChL = resampled.chL;
+            finalChR = resampled.chR;
+          }
+
+          await this.runParallelStream(finalChL, finalChR, 44100, controller);
 
         } catch (err: unknown) {
           const error = err instanceof Error ? err : new Error(String(err));
@@ -532,6 +551,35 @@ export class UAR {
     const chR = (dataValue as { chR?: unknown }).chR;
     if (!(chL instanceof Float32Array) || !(chR instanceof Float32Array)) return null;
     return { chL, chR };
+  }
+
+  /**
+   * 将双声道数据重采样到 44100Hz
+   */
+  private async resampleChannelsTo44100(
+    chL: Float32Array,
+    chR: Float32Array,
+    sampleRate: number
+  ): Promise<{ chL: Float32Array; chR: Float32Array }> {
+    if (sampleRate === 44100) return { chL, chR };
+
+    const targetFrames = Math.round((chL.length * 44100) / sampleRate);
+    const offlineCtx = new OfflineAudioContext(2, targetFrames, 44100);
+
+    const buffer = offlineCtx.createBuffer(2, chL.length, sampleRate);
+    buffer.copyToChannel(chL, 0);
+    buffer.copyToChannel(chR, 1);
+
+    const source = offlineCtx.createBufferSource();
+    source.buffer = buffer;
+    source.connect(offlineCtx.destination);
+    source.start();
+
+    const renderedBuffer = await offlineCtx.startRendering();
+    return {
+      chL: renderedBuffer.getChannelData(0),
+      chR: renderedBuffer.getChannelData(1)
+    };
   }
 }
 
