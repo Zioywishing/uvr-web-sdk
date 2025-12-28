@@ -1,9 +1,9 @@
 <script setup lang="ts">
 import { ref, computed, onMounted } from 'vue';
-import { UAR } from 'uar-web-sdk';
-import fftWorkerUrl from 'uar-web-sdk/worker-fft?worker&url';
-import ortWorkerUrl from 'uar-web-sdk/worker-ort?worker&url';
-import ifftWorkerUrl from 'uar-web-sdk/worker-ifft?worker&url';
+import { UVR } from '@uvr-web-sdk/core';
+import fftWorkerUrl from '@uvr-web-sdk/core/worker-fft?worker&url';
+import ortWorkerUrl from '@uvr-web-sdk/core/worker-ort?worker&url';
+import ifftWorkerUrl from '@uvr-web-sdk/core/worker-ifft?worker&url';
 
 // 内置模型列表
 const availableModels = [
@@ -32,13 +32,13 @@ const status = ref('就绪');
 const audioFile = ref<File | null>(null);
 const isProcessing = ref(false);
 
-let uar: UAR | null = null;
+let uvr: UVR | null = null;
 let audioCtx: AudioContext | null = null;
 
 onMounted(async () => {
   console.log('[Demo] 页面挂载，开始自动初始化...');
   try {
-    uar = new UAR({
+    uvr = new UVR({
       modelUrl: modelUrl.value,
       fftWorkerUrl,
       ortWorkerUrl,
@@ -47,7 +47,7 @@ onMounted(async () => {
       workerCount: workerCount.value
     });
     status.value = '正在预初始化...';
-    await uar.init();
+    await uvr.init();
     status.value = '就绪 (已初始化)';
     console.log('[Demo] 自动初始化完成');
   } catch (err: unknown) {
@@ -84,10 +84,10 @@ const startProcessing = async () => {
   status.value = '处理中...';
 
   try {
-    // 如果 uar 已经初始化且模型 URL 没变，可以直接使用
+    // 如果 uvr 已经初始化且模型 URL 没变，可以直接使用
     // 这里为了简单，如果实例不存在则创建，如果存在则检查配置
-    if (!uar) {
-      uar = new UAR({
+    if (!uvr) {
+      uvr = new UVR({
         modelUrl: modelUrl.value,
         fftWorkerUrl,
         ortWorkerUrl,
@@ -95,17 +95,17 @@ const startProcessing = async () => {
         provider: selectedProvider.value,
         workerCount: workerCount.value
       });
-      await uar.init();
+      await uvr.init();
     } else {
       // 检查配置是否变化
       if (
-        uar.options.modelUrl !== modelUrl.value || 
-        uar.options.provider !== selectedProvider.value ||
-        uar.options.workerCount !== workerCount.value
+        uvr.options.modelUrl !== modelUrl.value || 
+        uvr.options.provider !== selectedProvider.value ||
+        uvr.options.workerCount !== workerCount.value
       ) {
         console.log('[Demo] 检测到配置变化，重新创建实例');
-        uar.destroy(); // 销毁旧实例
-        uar = new UAR({
+        uvr.destroy(); // 销毁旧实例
+        uvr = new UVR({
           modelUrl: modelUrl.value,
           fftWorkerUrl,
           ortWorkerUrl,
@@ -113,7 +113,7 @@ const startProcessing = async () => {
           provider: selectedProvider.value,
           workerCount: workerCount.value
         });
-        await uar.init();
+        await uvr.init();
       }
     }
 
@@ -121,7 +121,7 @@ const startProcessing = async () => {
     const arrayBuffer = await audioFile.value.arrayBuffer();
 
     status.value = '处理中...';
-    const stream = uar.process(arrayBuffer);
+    const stream = uvr.process(arrayBuffer);
 
     status.value = '正在播放...';
     await playStream(stream);
@@ -189,9 +189,9 @@ const playStream = async (stream: ReadableStream<Float32Array>) => {
 };
 
 const handleDestroy = () => {
-  if (uar) {
-    uar.destroy();
-    uar = null;
+  if (uvr) {
+    uvr.destroy();
+    uvr = null;
     status.value = '实例已销毁';
     console.log('[Demo] 实例已销毁');
   }
@@ -200,7 +200,7 @@ const handleDestroy = () => {
 
 <template>
   <div class="container">
-    <h1>UAR Web SDK Demo (Vue)</h1>
+    <h1>UVR Web SDK Demo (Vue)</h1>
     
     <div class="card">
       <div class="form-group">

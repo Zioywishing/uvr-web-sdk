@@ -1,5 +1,5 @@
-import { rfft, irfft } from '@uar/fft';
-import { ort, type InferenceSession } from '@uar/ort-runtime-webgpu';
+import { rfft, irfft } from '@uvr-web-sdk/fft';
+import { ort, type InferenceSession } from '@uvr-web-sdk/ort-runtime-webgpu';
 
 // 定义 WebGPU 相关接口，避免使用 any
 interface WebGPUAdapter {

@@ -1,4 +1,4 @@
-import { ort, type InferenceSession } from '@uar/ort-runtime-webgpu';
+import { ort, type InferenceSession } from '@uvr-web-sdk/ort-runtime-webgpu';
 
 interface WebGPUAdapter {
   requestDevice(): Promise<unknown>;

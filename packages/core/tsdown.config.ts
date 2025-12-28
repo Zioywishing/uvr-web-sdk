@@ -13,5 +13,5 @@ export default defineConfig({
   platform: 'browser',
   dts: true,
   // Ensure we bundle our internal packages
-  noExternal: ['@uar/fft', '@uar/ort-runtime-webgpu'],
+  noExternal: ['@uvr-web-sdk/fft', '@uvr-web-sdk/ort-runtime-webgpu'],
 })

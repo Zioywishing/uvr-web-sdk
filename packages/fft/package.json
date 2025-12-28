@@ -1,5 +1,5 @@
 {
-  "name": "@uar/fft",
+  "name": "@uvr-web-sdk/fft",
   "version": "1.0.0",
   "main": "./dist/index.mjs",
   "module": "./dist/index.mjs",

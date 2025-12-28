@@ -4,7 +4,7 @@ type Provider = 'wasm' | 'webgpu';
 type F32 = Float32Array<ArrayBufferLike>;
 type DomF32 = Float32Array<ArrayBuffer>;
 
-export type UAROptions =
+export type UVROptions =
   | {
       modelUrl: string;
       provider?: Provider;
@@ -66,8 +66,8 @@ function toDomFloat32Array(src: F32): DomF32 {
   return new Float32Array(src) as unknown as DomF32;
 }
 
-export class UAR {
-  options: UAROptions;
+export class UVR {
+  options: UVROptions;
 
   private status: 'UNINITIALIZED' | 'FREE' | 'BUSY' = 'UNINITIALIZED';
   private workers: Worker[] = [];
@@ -82,7 +82,7 @@ export class UAR {
   private initPromise: Promise<void> | null = null;
   private audioCtx: AudioContext | null = null;
 
-  public constructor(options: UAROptions) {
+  public constructor(options: UVROptions) {
     this.options = {
       ...options,
       workerCount: options.workerCount || 1,
@@ -119,10 +119,10 @@ export class UAR {
 
       const count = this.options.workerCount || 1;
       if (this.isPipelineMode()) {
-        const opts = this.options as Extract<UAROptions, { fftWorkerUrl: string }>;
-        console.log(`[UAR] 正在创建 ${count} 个 FFT Worker...`, opts.fftWorkerUrl);
-        console.log('[UAR] 正在创建 ORT Worker...', opts.ortWorkerUrl);
-        console.log(`[UAR] 正在创建 ${count} 个 IFFT Worker...`, opts.ifftWorkerUrl);
+        const opts = this.options as Extract<UVROptions, { fftWorkerUrl: string }>;
+        console.log(`[UVR] 正在创建 ${count} 个 FFT Worker...`, opts.fftWorkerUrl);
+        console.log('[UVR] 正在创建 ORT Worker...', opts.ortWorkerUrl);
+        console.log(`[UVR] 正在创建 ${count} 个 IFFT Worker...`, opts.ifftWorkerUrl);
 
         try {
           this.fftWorkers = await Promise.all(Array.from({ length: count }, (_, i) => this.createFftWorker(opts.fftWorkerUrl, i)));
@@ -158,7 +158,7 @@ export class UAR {
         if (typeof legacyWorkerUrl !== 'string') {
           throw new Error('未提供 workerUrl（旧模式）或 fftWorkerUrl/ortWorkerUrl/ifftWorkerUrl（新模式）');
         }
-        console.log(`[UAR] 正在创建 ${count} 个 Worker...`, legacyWorkerUrl);
+        console.log(`[UVR] 正在创建 ${count} 个 Worker...`, legacyWorkerUrl);
 
         const promises: Promise<Worker>[] = [];
         for (let i = 0; i < count; i++) {
@@ -177,10 +177,10 @@ export class UAR {
 
       // 预创建并启动 AudioContext 以热身（减少首次解码延迟）
       if (!this.audioCtx) {
-        console.log('[UAR] 正在预创建 AudioContext (44100Hz)...');
+        console.log('[UVR] 正在预创建 AudioContext (44100Hz)...');
         this.audioCtx = new AudioContext({ sampleRate: 44100 });
         if (this.audioCtx.state === 'suspended') {
-            this.audioCtx.resume().catch(e => console.warn('[UAR] AudioContext resume failed during init:', e));
+            this.audioCtx.resume().catch(e => console.warn('[UVR] AudioContext resume failed during init:', e));
         }
       }
 
@@ -195,9 +195,8 @@ export class UAR {
     const worker = new Worker(workerUrl, { type: 'module' });
 
     await waitForType(worker, 'worker_ready');
-    console.log(`[UAR] Worker ${index} 就绪`);
-
-    console.log(`[UAR] Worker ${index} 正在预加载模型...`, this.options.modelUrl);
+    console.log(`[UVR] Worker ${index} 就绪`);
+    console.log(`[UVR] Worker ${index} 正在预加载模型...`, this.options.modelUrl);
     worker.postMessage({
       type: 'preload',
       data: {
@@ -212,26 +211,26 @@ export class UAR {
   private async createFftWorker(workerUrl: string, index: number): Promise<Worker> {
     const worker = new Worker(workerUrl, { type: 'module' });
     await waitForType(worker, 'worker_ready');
-    console.log(`[UAR] FFT Worker ${index} 就绪`);
+    console.log(`[UVR] FFT Worker ${index} 就绪`);
     return worker;
   }
 
   private async createIfftWorker(workerUrl: string, index: number): Promise<Worker> {
     const worker = new Worker(workerUrl, { type: 'module' });
     await waitForType(worker, 'worker_ready');
-    console.log(`[UAR] IFFT Worker ${index} 就绪`);
+    console.log(`[UVR] IFFT Worker ${index} 就绪`);
     return worker;
   }
 
   private async createOrtWorker(workerUrl: string): Promise<Worker> {
     const worker = new Worker(workerUrl, { type: 'module' });
     await waitForType(worker, 'worker_ready');
-    console.log('[UAR] ORT Worker 就绪');
+    console.log('[UVR] ORT Worker 就绪');
     return worker;
   }
 
   public destroy() {
-    console.log('[UAR] Destroying...');
+    console.log('[UVR] Destroying...');
     this.workers.forEach(w => w.terminate());
     this.workers = [];
     this.fftWorkers.forEach(w => w.terminate());
@@ -253,9 +252,9 @@ export class UAR {
 
   public process(AudioData: ArrayBuffer): ReadableStream<Float32Array> {
     if (this.status === 'BUSY') {
-      throw new Error('UAR is busy');
+      throw new Error('UVR is busy');
     }
-    console.log('[UAR] 开始处理音频数据, 大小:', AudioData.byteLength);
+    console.log('[UVR] 开始处理音频数据, 大小:', AudioData.byteLength);
     this.status = 'BUSY';
 
     let controller: ReadableStreamDefaultController<Float32Array>;
@@ -275,9 +274,9 @@ export class UAR {
             await audioCtx.resume();
           }
 
-          console.log('[UAR] 解码音频数据...');
+          console.log('[UVR] 解码音频数据...');
           const audioBuffer = await audioCtx.decodeAudioData(AudioData.slice(0));
-          console.log('[UAR] 音频解码完成, 时长:', audioBuffer.duration, '采样率:', audioBuffer.sampleRate);
+          console.log('[UVR] 音频解码完成, 时长:', audioBuffer.duration, '采样率:', audioBuffer.sampleRate);
 
           const chL = audioBuffer.getChannelData(0) as unknown as F32;
           const chR = (audioBuffer.numberOfChannels > 1 ? audioBuffer.getChannelData(1) : chL) as unknown as F32;
@@ -286,7 +285,7 @@ export class UAR {
           let finalChL: F32 = chL;
           let finalChR: F32 = chR;
           if (audioBuffer.sampleRate !== 44100) {
-            console.log(`[UAR] 采样率不匹配 (${audioBuffer.sampleRate} -> 44100), 正在重采样...`);
+            console.log(`[UVR] 采样率不匹配 (${audioBuffer.sampleRate} -> 44100), 正在重采样...`);
             const resampled = await this.resampleChannelsTo44100(chL, chR, audioBuffer.sampleRate);
             finalChL = resampled.chL;
             finalChR = resampled.chR;
@@ -296,7 +295,7 @@ export class UAR {
 
         } catch (err: unknown) {
           const error = err instanceof Error ? err : new Error(String(err));
-          console.error('[UAR] 处理过程出错:', error);
+          console.error('[UVR] 处理过程出错:', error);
           controller.error(error);
           this.status = 'FREE';
         }
@@ -310,9 +309,9 @@ export class UAR {
    */
   public processChannels(chL: Float32Array, chR: Float32Array, sampleRate: number): ReadableStream<Float32Array> {
     if (this.status === 'BUSY') {
-      throw new Error('UAR is busy');
+      throw new Error('UVR is busy');
     }
-    console.log('[UAR] 开始处理声道数据, 长度:', chL.length, '采样率:', sampleRate);
+    console.log('[UVR] 开始处理声道数据, 长度:', chL.length, '采样率:', sampleRate);
     this.status = 'BUSY';
 
     let controller: ReadableStreamDefaultController<Float32Array>;
@@ -326,7 +325,7 @@ export class UAR {
           let finalChL = chL;
           let finalChR = chR;
           if (sampleRate !== 44100) {
-            console.log(`[UAR] 输入采样率不匹配 (${sampleRate} -> 44100), 正在重采样...`);
+            console.log(`[UVR] 输入采样率不匹配 (${sampleRate} -> 44100), 正在重采样...`);
             const resampled = await this.resampleChannelsTo44100(chL, chR, sampleRate);
             finalChL = resampled.chL;
             finalChR = resampled.chR;
@@ -336,7 +335,7 @@ export class UAR {
 
         } catch (err: unknown) {
           const error = err instanceof Error ? err : new Error(String(err));
-          console.error('[UAR] 处理过程出错:', error);
+          console.error('[UVR] 处理过程出错:', error);
           controller.error(error);
           this.status = 'FREE';
         }
@@ -352,13 +351,13 @@ export class UAR {
   ) {
     if (this.isPipelineMode()) {
       const fftCount = this.fftWorkers.length;
-      console.log(`[UAR] 使用流水线模式（FFT Worker: ${fftCount}, ORT Worker: 1, IFFT Worker: ${this.ifftWorkers.length}）`);
+      console.log(`[UVR] 使用流水线模式（FFT Worker: ${fftCount}, ORT Worker: 1, IFFT Worker: ${this.ifftWorkers.length}）`);
       await this.runPipelineStream(chL, chR, sampleRate, controller);
       return;
     }
 
     const workerCount = this.workers.length;
-    console.log(`[UAR] 使用 ${workerCount} 个 Worker 处理`);
+    console.log(`[UVR] 使用 ${workerCount} 个 Worker 处理`);
 
     if (workerCount <= 1) {
       await this.runSingleWorkerStream(chL, chR, sampleRate, controller);
@@ -1088,4 +1087,4 @@ class OrtWorkerClient {
   }
 }
 
-export default UAR;
+export default UVR;

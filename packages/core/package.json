@@ -1,11 +1,11 @@
 {
-  "name": "uar-web-sdk",
+  "name": "@uvr-web-sdk/core",
   "version": "1.0.0",
   "dependencies": {
-    "@uar/fft": "workspace:*",
-    "@uar/ort-runtime-webgpu": "workspace:*"
+    "@uvr-web-sdk/fft": "workspace:*",
+    "@uvr-web-sdk/ort-runtime-webgpu": "workspace:*"
   },
-  "description": "A starter for creating a TypeScript package.",
+  "description": "Core library of UVR SDK",
   "author": "Author Name <author.name@mail.com>",
   "license": "MIT",
   "homepage": "https://github.com/author/library#readme",

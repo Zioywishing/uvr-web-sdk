@@ -1,4 +1,4 @@
-# uar-web-sdk
+# uvr-web-sdk
 
 To install dependencies:
 

@@ -1,9 +1,9 @@
 import { expect, test } from 'vitest'
-import { UAR } from '../src'
+import { UVR } from '../src'
 
-test('UAR instantiation', () => {
-  const uar = new UAR({ modelUrl: 'model.onnx', workerUrl: 'worker.js' });
-  expect(uar).toBeDefined();
+test('UVR instantiation', () => {
+  const uvr = new UVR({ modelUrl: 'model.onnx', workerUrl: 'worker.js' });
+  expect(uvr).toBeDefined();
 })
 
 type MessageListener = (event: MessageEvent) => void
@@ -120,8 +120,8 @@ test('多 worker 分段合并保持顺序与边界', async () => {
   const worker0 = new FakeWorker({ deferResults: true })
   const worker1 = new FakeWorker({ deferResults: false })
 
-  const uar = new UAR({ modelUrl: 'model.onnx', workerUrl: 'worker.js', workerCount: 2 })
-  ;(uar as unknown as { workers: Worker[] }).workers = [
+  const uvr = new UVR({ modelUrl: 'model.onnx', workerUrl: 'worker.js', workerCount: 2 })
+  ;(uvr as unknown as { workers: Worker[] }).workers = [
     worker0 as unknown as Worker,
     worker1 as unknown as Worker
   ]
@@ -144,9 +144,9 @@ test('多 worker 分段合并保持顺序与边界', async () => {
     controller: ReadableStreamDefaultController<Float32Array>
   ) => Promise<void>
 
-  const runParallelStream = (uar as unknown as { runParallelStream: RunParallelStream }).runParallelStream
+  const runParallelStream = (uvr as unknown as { runParallelStream: RunParallelStream }).runParallelStream
   await runParallelStream.call(
-    uar,
+    uvr,
     chL,
     chR,
     44100,
@@ -171,7 +171,7 @@ test('流水线模式输出长度与对齐偏移正确', async () => {
     chR[i] = 1000 + i
   }
 
-  const uar = new UAR({
+  const uvr = new UVR({
     modelUrl: 'model.onnx',
     fftWorkerUrl: 'worker-fft.js',
     ortWorkerUrl: 'worker-ort.js',
@@ -220,10 +220,10 @@ test('流水线模式输出长度与对齐偏移正确', async () => {
     }
   }
 
-  ;(uar as unknown as { initPromise: Promise<void> | null }).initPromise = Promise.resolve()
-  ;(uar as unknown as { fftClients: unknown[] }).fftClients = [fakeFft, fakeFft]
-  ;(uar as unknown as { ifftClients: unknown[] }).ifftClients = [fakeIfft, fakeIfft]
-  ;(uar as unknown as { ortClient: unknown }).ortClient = fakeOrt
+  ;(uvr as unknown as { initPromise: Promise<void> | null }).initPromise = Promise.resolve()
+  ;(uvr as unknown as { fftClients: unknown[] }).fftClients = [fakeFft, fakeFft]
+  ;(uvr as unknown as { ifftClients: unknown[] }).ifftClients = [fakeIfft, fakeIfft]
+  ;(uvr as unknown as { ortClient: unknown }).ortClient = fakeOrt
 
   const received: Float32Array[] = []
   const controller = {
@@ -243,9 +243,9 @@ test('流水线模式输出长度与对齐偏移正确', async () => {
     controller: ReadableStreamDefaultController<Float32Array>
   ) => Promise<void>
 
-  const runParallelStream = (uar as unknown as { runParallelStream: RunParallelStream }).runParallelStream
+  const runParallelStream = (uvr as unknown as { runParallelStream: RunParallelStream }).runParallelStream
   await runParallelStream.call(
-    uar,
+    uvr,
     chL,
     chR,
     44100,

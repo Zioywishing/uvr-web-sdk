@@ -1,5 +1,5 @@
 {
-  "name": "uar-demo-html",
+  "name": "uvr-demo-html",
   "private": true,
   "version": "0.0.0",
   "type": "module",
@@ -9,7 +9,7 @@
     "preview": "vite preview"
   },
   "dependencies": {
-    "uar-web-sdk": "workspace:*",
+    "@uvr-web-sdk/core": "workspace:*",
     "vue": "^3.4.0"
   },
   "devDependencies": {

@@ -1,4 +1,4 @@
-import { rfft } from '@uar/fft';
+import { rfft } from '@uvr-web-sdk/fft';
 
 interface InitMessage {
   type: 'init';

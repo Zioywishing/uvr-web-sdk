@@ -1,4 +1,4 @@
-import { UARNode } from './src/index';
+import { UVRNode } from './src/index';
 import { join } from 'path';
 
 async function runTest() {
@@ -8,7 +8,7 @@ async function runTest() {
   const modelPath = join(process.cwd(), '../core/tests/UVR-MDX-NET-Inst_HQ_3.onnx');
   console.log('模型路径:', modelPath);
 
-  const uar = new UARNode({
+  const uvr = new UVRNode({
     modelUrl: modelPath,
     provider: 'wasm' // 或者 cpu, 取决于环境支持
   });
@@ -40,7 +40,7 @@ async function runTest() {
         const subL = chL.slice(offset, end);
         const subR = chR.slice(offset, end);
         
-        const result = await uar.process(subL, subR);
+        const result = await uvr.process(subL, subR);
         totalOutSamples += result.chL.length;
         
         if (result.chL.length > 0) {
@@ -50,7 +50,7 @@ async function runTest() {
         offset = end;
     }
 
-    const flushResult = await uar.flush();
+    const flushResult = await uvr.flush();
     totalOutSamples += flushResult.chL.length;
     
     const endTime = performance.now();

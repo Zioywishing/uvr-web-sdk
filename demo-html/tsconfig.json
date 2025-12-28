@@ -17,11 +17,8 @@
     "noFallthroughCasesInSwitch": true,
     "baseUrl": ".",
     "paths": {
-      "uar-web-sdk": ["../packages/core/src/index.ts"],
-      "uar-web-sdk/worker": ["../packages/core/src/worker.ts"],
-      "uar-web-sdk/worker-fft": ["../packages/core/src/worker-fft.ts"],
-      "uar-web-sdk/worker-ort": ["../packages/core/src/worker-ort.ts"],
-      "uar-web-sdk/worker-ifft": ["../packages/core/src/worker-ifft.ts"]
+      "@uvr-web-sdk/core": ["../packages/core/src/index.ts"],
+      "@uvr-web-sdk/core/*": ["../packages/core/src/*"]
     }
   },
   "include": ["src/**/*.ts", "src/**/*.d.ts", "src/**/*.tsx", "src/**/*.vue"],

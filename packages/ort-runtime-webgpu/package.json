@@ -1,5 +1,5 @@
 {
-  "name": "@uar/ort-runtime-webgpu",
+  "name": "@uvr-web-sdk/ort-runtime-webgpu",
   "version": "1.0.0",
   "main": "./dist/index.mjs",
   "module": "./dist/index.mjs",

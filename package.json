@@ -1,5 +1,5 @@
 {
-  "name": "uar-web-sdk",
+  "name": "uvr-web-sdk",
   "workspaces": [
     "packages/*",
     "demo-html"

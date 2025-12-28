@@ -1,12 +1,12 @@
 {
-  "name": "@uar/node",
+  "name": "@uvr-web-sdk/node",
   "version": "1.0.0",
-  "description": "Node.js/Bun version of UAR SDK",
+  "description": "Node.js/Bun version of UVR SDK",
   "type": "module",
   "main": "./src/index.ts",
   "types": "./src/index.ts",
   "dependencies": {
-    "@uar/fft": "workspace:*",
+    "@uvr-web-sdk/fft": "workspace:*",
     "onnxruntime-node": "^1.18.0"
   },
   "devDependencies": {

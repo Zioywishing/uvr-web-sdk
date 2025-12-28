@@ -1,4 +1,4 @@
-import { rfft, irfft } from '@uar/fft';
+import { rfft, irfft } from '@uvr-web-sdk/fft';
 import * as ort from 'onnxruntime-node';
 
 // 辅助函数
@@ -33,7 +33,7 @@ interface StreamingState {
     outputPos: number;
 }
 
-export class UARNode {
+export class UVRNode {
     private state: StreamingState | null = null;
     private options: { modelUrl: string; provider?: string } | null = null;
 
