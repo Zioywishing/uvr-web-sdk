@@ -4,6 +4,9 @@ export default defineConfig({
   entry: {
     index: 'src/index.ts',
     worker: 'src/worker.ts',
+    'worker-fft': 'src/worker-fft.ts',
+    'worker-ort': 'src/worker-ort.ts',
+    'worker-ifft': 'src/worker-ifft.ts',
   },
   format: ['esm'],
   target: 'esnext',

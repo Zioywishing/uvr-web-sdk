@@ -19,6 +19,9 @@
   "exports": {
     ".": "./dist/index.mjs",
     "./worker": "./dist/worker.mjs",
+    "./worker-fft": "./dist/worker-fft.mjs",
+    "./worker-ort": "./dist/worker-ort.mjs",
+    "./worker-ifft": "./dist/worker-ifft.mjs",
     "./package.json": "./package.json"
   },
   "main": "./dist/index.mjs",
@@ -30,7 +33,7 @@
   "scripts": {
     "build": "tsdown",
     "dev": "tsdown --watch",
-    "test": "vitest",
+    "test": "vitest run",
     "typecheck": "tsc --noEmit",
     "prepublishOnly": "bun run build"
   },

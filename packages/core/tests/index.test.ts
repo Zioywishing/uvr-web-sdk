@@ -161,3 +161,101 @@ test('多 worker 分段合并保持顺序与边界', async () => {
     expect(out[i * 2 + 1]).toBe(chR[i])
   }
 })
+
+test('流水线模式输出长度与对齐偏移正确', async () => {
+  const sampleCount = 20
+  const chL = new Float32Array(sampleCount)
+  const chR = new Float32Array(sampleCount)
+  for (let i = 0; i < sampleCount; i++) {
+    chL[i] = i
+    chR[i] = 1000 + i
+  }
+
+  const uar = new UAR({
+    modelUrl: 'model.onnx',
+    fftWorkerUrl: 'worker-fft.js',
+    ortWorkerUrl: 'worker-ort.js',
+    ifftWorkerUrl: 'worker-ifft.js',
+    provider: 'wasm',
+    workerCount: 2
+  })
+
+  const dimF = 3072
+  const dimT = 256
+  const nfft = 6144
+  const hop = 1024
+  const chunkSize = hop * (dimT - 1)
+  const segExt = chunkSize + nfft
+  const padSamples = Math.max(0, Math.floor(0.4 * 44100))
+
+  interface FftClientLike {
+    compute(jobId: number, segL: Float32Array, segR: Float32Array): Promise<Float32Array>
+  }
+  interface OrtClientLike {
+    run(jobId: number, frames: Float32Array, dimF: number, dimT: number): Promise<Float32Array>
+  }
+  interface IfftClientLike {
+    compute(jobId: number, spec: Float32Array): Promise<{ segOutL: Float32Array; segOutR: Float32Array }>
+  }
+
+  const fakeFft: FftClientLike = {
+    async compute(_jobId: number, _segL: Float32Array, _segR: Float32Array) {
+      return new Float32Array(4 * dimF * dimT)
+    }
+  }
+  const fakeOrt: OrtClientLike = {
+    async run(_jobId: number, frames: Float32Array) {
+      return frames
+    }
+  }
+  const fakeIfft: IfftClientLike = {
+    async compute(_jobId: number, _spec: Float32Array) {
+      const segOutL = new Float32Array(segExt)
+      const segOutR = new Float32Array(segExt)
+      for (let i = 0; i < segExt; i++) {
+        segOutL[i] = i
+        segOutR[i] = 1000 + i
+      }
+      return { segOutL, segOutR }
+    }
+  }
+
+  ;(uar as unknown as { initPromise: Promise<void> | null }).initPromise = Promise.resolve()
+  ;(uar as unknown as { fftClients: unknown[] }).fftClients = [fakeFft, fakeFft]
+  ;(uar as unknown as { ifftClients: unknown[] }).ifftClients = [fakeIfft, fakeIfft]
+  ;(uar as unknown as { ortClient: unknown }).ortClient = fakeOrt
+
+  const received: Float32Array[] = []
+  const controller = {
+    enqueue(chunk: Float32Array) {
+      received.push(chunk)
+    },
+    close() {},
+    error(err: unknown) {
+      throw err instanceof Error ? err : new Error(String(err))
+    }
+  }
+
+  type RunParallelStream = (
+    left: Float32Array,
+    right: Float32Array,
+    sampleRate: number,
+    controller: ReadableStreamDefaultController<Float32Array>
+  ) => Promise<void>
+
+  const runParallelStream = (uar as unknown as { runParallelStream: RunParallelStream }).runParallelStream
+  await runParallelStream.call(
+    uar,
+    chL,
+    chR,
+    44100,
+    controller as unknown as ReadableStreamDefaultController<Float32Array>
+  )
+
+  const out = concatFloat32Arrays(received)
+  expect(out.length).toBe(sampleCount * 2)
+  for (let i = 0; i < sampleCount; i++) {
+    expect(out[i * 2]).toBe(padSamples + i)
+    expect(out[i * 2 + 1]).toBe(1000 + padSamples + i)
+  }
+})

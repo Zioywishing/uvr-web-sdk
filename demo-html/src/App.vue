@@ -1,7 +1,9 @@
 <script setup lang="ts">
 import { ref, computed, onMounted } from 'vue';
 import { UAR } from 'uar-web-sdk';
-import workerUrl from 'uar-web-sdk/worker?worker&url';
+import fftWorkerUrl from 'uar-web-sdk/worker-fft?worker&url';
+import ortWorkerUrl from 'uar-web-sdk/worker-ort?worker&url';
+import ifftWorkerUrl from 'uar-web-sdk/worker-ifft?worker&url';
 
 // 内置模型列表
 const availableModels = [
@@ -15,7 +17,7 @@ const availableModels = [
 
 const selectedModel = ref(availableModels[0]);
 const selectedProvider = ref<'wasm' | 'webgpu'>('webgpu');
-const workerCount = ref(1);
+const workerCount = ref(3);
 const customModelUrl = ref('');
 const useCustomUrl = ref(false);
 
@@ -38,7 +40,9 @@ onMounted(async () => {
   try {
     uar = new UAR({
       modelUrl: modelUrl.value,
-      workerUrl: workerUrl,
+      fftWorkerUrl,
+      ortWorkerUrl,
+      ifftWorkerUrl,
       provider: selectedProvider.value,
       workerCount: workerCount.value
     });
@@ -85,7 +89,9 @@ const startProcessing = async () => {
     if (!uar) {
       uar = new UAR({
         modelUrl: modelUrl.value,
-        workerUrl: workerUrl,
+        fftWorkerUrl,
+        ortWorkerUrl,
+        ifftWorkerUrl,
         provider: selectedProvider.value,
         workerCount: workerCount.value
       });
@@ -101,7 +107,9 @@ const startProcessing = async () => {
         uar.destroy(); // 销毁旧实例
         uar = new UAR({
           modelUrl: modelUrl.value,
-          workerUrl: workerUrl,
+          fftWorkerUrl,
+          ortWorkerUrl,
+          ifftWorkerUrl,
           provider: selectedProvider.value,
           workerCount: workerCount.value
         });

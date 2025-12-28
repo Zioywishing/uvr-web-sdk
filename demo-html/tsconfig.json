@@ -18,7 +18,10 @@
     "baseUrl": ".",
     "paths": {
       "uar-web-sdk": ["../packages/core/src/index.ts"],
-      "uar-web-sdk/worker": ["../packages/core/src/worker.ts"]
+      "uar-web-sdk/worker": ["../packages/core/src/worker.ts"],
+      "uar-web-sdk/worker-fft": ["../packages/core/src/worker-fft.ts"],
+      "uar-web-sdk/worker-ort": ["../packages/core/src/worker-ort.ts"],
+      "uar-web-sdk/worker-ifft": ["../packages/core/src/worker-ifft.ts"]
     }
   },
   "include": ["src/**/*.ts", "src/**/*.d.ts", "src/**/*.tsx", "src/**/*.vue"],
