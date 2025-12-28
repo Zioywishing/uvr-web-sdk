@@ -15,7 +15,7 @@ const availableModels = [
 
 const selectedModel = ref(availableModels[0]);
 const selectedProvider = ref<'wasm' | 'webgpu'>('webgpu');
-const workerCount = ref(3);
+const workerCount = ref(1);
 const customModelUrl = ref('');
 const useCustomUrl = ref(false);
 
@@ -130,7 +130,9 @@ const startProcessing = async () => {
 
 const playStream = async (stream: ReadableStream<Float32Array>) => {
   if (!audioCtx) {
-    audioCtx = new AudioContext();
+    audioCtx = new AudioContext({
+      sampleRate: 44100
+    });
   }
   if (audioCtx.state === 'suspended') {
     await audioCtx.resume();
