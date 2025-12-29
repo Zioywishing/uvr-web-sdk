@@ -143,7 +143,15 @@ test('init 并行启动模型解析与 Worker 创建', async () => {
   const initPromise = uvr.init()
   await Promise.resolve()
 
+  // 现在 fetchModelAndParseShape 是第一步
   expect(started).toContain('shape')
+  
+  // 完成 shape 解析
+  resolveShape({ dimF: 1, dimT: 1, nfft: 1, hop: 1, chunkSize: 1, segStep: 1 })
+  
+  // 等待下一轮微任务，Worker 创建应该开始了
+  await new Promise(r => setTimeout(r, 0));
+
   expect(started).toContain('ort')
   expect(started).toContain('fft-0')
   expect(started).toContain('fft-1')
@@ -153,7 +161,6 @@ test('init 并行启动模型解析与 Worker 创建', async () => {
   releaseFft()
   releaseOrt()
   releaseIfft()
-  resolveShape({ dimF: 1, dimT: 1, nfft: 1, hop: 1, chunkSize: 1, segStep: 1 })
 
   await initPromise
 })
@@ -222,6 +229,7 @@ test('流水线模式输出长度与对齐偏移正确', async () => {
   ;(uvr as unknown as { fftClients: unknown[] }).fftClients = [fakeFft, fakeFft]
   ;(uvr as unknown as { ifftClients: unknown[] }).ifftClients = [fakeIfft, fakeIfft]
   ;(uvr as unknown as { ortClient: unknown }).ortClient = fakeOrt
+  ;(uvr as unknown as { status: string }).status = 'FREE'
 
   const received: Float32Array[] = []
   const controller = {

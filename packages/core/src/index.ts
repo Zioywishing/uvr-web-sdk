@@ -74,6 +74,7 @@ export class UVR {
   private streamParams: StreamParams | null = null;
   private initPromise: Promise<void> | null = null;
   private audioCtx: OfflineAudioContext | null = null;
+  private abortController: AbortController | null = null;
 
   public constructor(options: UVROptions) {
     this.options = {
@@ -82,10 +83,12 @@ export class UVR {
     };
   }
 
-  private async fetchModelAndParseShape(): Promise<StreamParams> {
+  private async fetchModelAndParseShape(signal?: AbortSignal): Promise<StreamParams> {
     console.log('[UVR] 正在下载模型并解析输入形态...', this.options.modelUrl);
-    const response = await fetch(this.options.modelUrl);
+    const response = await fetch(this.options.modelUrl, { signal });
     const buffer = await response.arrayBuffer();
+    if (signal?.aborted) throw new Error('操作已中止');
+
     const inputs = parseOnnxInputShapes(new Uint8Array(buffer));
 
     if (inputs.length === 0) {
@@ -125,6 +128,9 @@ export class UVR {
       return this.initPromise;
     }
 
+    this.abortController = new AbortController();
+    const signal = this.abortController.signal;
+
     this.initPromise = (async () => {
       if (this.fftWorkers.length > 0 || this.ortWorker || this.ifftWorkers.length > 0) {
         return;
@@ -137,129 +143,146 @@ export class UVR {
       console.log('[UVR] 正在创建 ORT Worker...', opts.ortWorkerUrl);
       console.log(`[UVR] 正在创建 ${count} 个 IFFT Worker...`, opts.ifftWorkerUrl);
 
+      let createdFftWorkers: Worker[] = [];
+      let createdIfftWorkers: Worker[] = [];
+      let createdOrtWorker: Worker | null = null;
+
       try {
         const indices = Array.from({ length: count }, (_, i) => i);
-        const streamParamsPromise = this.fetchModelAndParseShape();
-        const fftWorkersPromise = Promise.all(indices.map((i) => this.createFftWorker(opts.fftWorkerUrl, i)));
-        const ortWorkerPromise = this.createOrtWorker(opts.ortWorkerUrl);
-        const ifftWorkersPromise = Promise.all(indices.map((i) => this.createIfftWorker(opts.ifftWorkerUrl, i)));
+        
+        // 1. 解析模型形状
+        const streamParams = await this.fetchModelAndParseShape(signal);
+        if (signal.aborted) throw new Error('操作已中止');
 
-        const [streamParamsResult, fftWorkersResult, ortWorkerResult, ifftWorkersResult] = await Promise.allSettled([
-          streamParamsPromise,
-          fftWorkersPromise,
-          ortWorkerPromise,
-          ifftWorkersPromise,
+        // 2. 并行创建 Workers
+        const [fftRes, ortRes, ifftRes] = await Promise.all([
+          Promise.all(indices.map((i) => this.createFftWorker(opts.fftWorkerUrl, i, signal))),
+          this.createOrtWorker(opts.ortWorkerUrl, signal),
+          Promise.all(indices.map((i) => this.createIfftWorker(opts.ifftWorkerUrl, i, signal))),
         ]);
 
-        const createdFftWorkers = fftWorkersResult.status === 'fulfilled' ? fftWorkersResult.value : [];
-        const createdIfftWorkers = ifftWorkersResult.status === 'fulfilled' ? ifftWorkersResult.value : [];
-        const createdOrtWorker = ortWorkerResult.status === 'fulfilled' ? ortWorkerResult.value : null;
+        createdFftWorkers = fftRes;
+        createdOrtWorker = ortRes;
+        createdIfftWorkers = ifftRes;
 
-        const cleanupCreated = () => {
-          createdFftWorkers.forEach((w) => w.terminate());
-          createdIfftWorkers.forEach((w) => w.terminate());
-          if (createdOrtWorker) createdOrtWorker.terminate();
-        };
+        if (signal.aborted) throw new Error('操作已中止');
 
-        if (streamParamsResult.status !== 'fulfilled') {
-          cleanupCreated();
-          throw streamParamsResult.reason;
-        }
-        if (fftWorkersResult.status !== 'fulfilled') {
-          cleanupCreated();
-          throw fftWorkersResult.reason;
-        }
-        if (ortWorkerResult.status !== 'fulfilled') {
-          cleanupCreated();
-          throw ortWorkerResult.reason;
-        }
-        if (ifftWorkersResult.status !== 'fulfilled') {
-          cleanupCreated();
-          throw ifftWorkersResult.reason;
-        }
-
-        const streamParams = streamParamsResult.value;
-        const fftWorkers = fftWorkersResult.value;
-        const ortWorker = ortWorkerResult.value;
-        const ifftWorkers = ifftWorkersResult.value;
-
+        // 3. 初始化 Clients
+        this.fftWorkers = createdFftWorkers;
+        this.ortWorker = createdOrtWorker;
+        this.ifftWorkers = createdIfftWorkers;
         this.streamParams = streamParams;
-        this.fftWorkers = fftWorkers;
-        this.ortWorker = ortWorker;
-        this.ifftWorkers = ifftWorkers;
 
         this.fftClients = this.fftWorkers.map((w, i) => new FftWorkerClient(w, i));
         this.ifftClients = this.ifftWorkers.map((w, i) => new IfftWorkerClient(w, i));
-        this.ortClient = new OrtWorkerClient(ortWorker);
+        this.ortClient = new OrtWorkerClient(this.ortWorker);
 
-        const params = this.getStreamParams();
+        // 4. 并行初始化模型和 Worker 状态
         await Promise.all([
-          this.ortClient.preload(this.options.modelUrl, this.options.provider),
-          Promise.all(this.fftClients.map((c) => c.init(params))),
-          Promise.all(this.ifftClients.map((c) => c.init(params))),
+          this.ortClient.preload(this.options.modelUrl, this.options.provider, signal),
+          Promise.all(this.fftClients.map((c) => c.init(streamParams, signal))),
+          Promise.all(this.ifftClients.map((c) => c.init(streamParams, signal))),
         ]);
+
+        if (signal.aborted) throw new Error('操作已中止');
+
+        // 预创建并启动 OfflineAudioContext 以热身
+        if (!this.audioCtx) {
+          console.log('[UVR] 正在预创建 OfflineAudioContext (44100Hz)...');
+          this.audioCtx = new OfflineAudioContext(2, 1, 44100);
+        }
+
+        this.status = 'FREE';
       } catch (e) {
-        this.fftWorkers.forEach(w => w.terminate());
-        this.ifftWorkers.forEach(w => w.terminate());
-        if (this.ortWorker) this.ortWorker.terminate();
-        this.fftWorkers = [];
-        this.ifftWorkers = [];
-        this.ortWorker = null;
-        this.fftClients = [];
-        this.ifftClients = [];
-        this.ortClient = null;
-        this.initPromise = null;
-        this.streamParams = null;
+        // 清理本次 init 过程中创建的所有资源
+        createdFftWorkers.forEach(w => w.terminate());
+        createdIfftWorkers.forEach(w => w.terminate());
+        if (createdOrtWorker) createdOrtWorker.terminate();
+        
+        // 如果是当前正在进行的 init 失败，重置状态
+        if (this.initPromise) {
+          this.fftWorkers = [];
+          this.ifftWorkers = [];
+          this.ortWorker = null;
+          this.fftClients = [];
+          this.ifftClients = [];
+          this.ortClient = null;
+          this.initPromise = null;
+          this.streamParams = null;
+          this.status = 'UNINITIALIZED';
+        }
         throw e;
       }
-
-      // 预创建并启动 OfflineAudioContext 以热身（减少首次解码延迟）
-      if (!this.audioCtx) {
-        console.log('[UVR] 正在预创建 OfflineAudioContext (44100Hz)...');
-        this.audioCtx = new OfflineAudioContext(2, 1, 44100);
-      }
-
-      this.status = 'FREE';
     })();
 
     return this.initPromise;
   }
 
-  private async createFftWorker(workerUrl: string, index: number): Promise<Worker> {
+  private async createFftWorker(workerUrl: string, index: number, signal?: AbortSignal): Promise<Worker> {
     const worker = new Worker(workerUrl, { type: 'module' });
-    await waitForType(worker, 'worker_ready');
-    console.log(`[UVR] FFT Worker ${index} 就绪`);
-    return worker;
+    try {
+      await waitForType(worker, 'worker_ready', signal);
+      console.log(`[UVR] FFT Worker ${index} 就绪`);
+      return worker;
+    } catch (e) {
+      worker.terminate();
+      throw e;
+    }
   }
 
-  private async createIfftWorker(workerUrl: string, index: number): Promise<Worker> {
+  private async createIfftWorker(workerUrl: string, index: number, signal?: AbortSignal): Promise<Worker> {
     const worker = new Worker(workerUrl, { type: 'module' });
-    await waitForType(worker, 'worker_ready');
-    console.log(`[UVR] IFFT Worker ${index} 就绪`);
-    return worker;
+    try {
+      await waitForType(worker, 'worker_ready', signal);
+      console.log(`[UVR] IFFT Worker ${index} 就绪`);
+      return worker;
+    } catch (e) {
+      worker.terminate();
+      throw e;
+    }
   }
 
-  private async createOrtWorker(workerUrl: string): Promise<Worker> {
+  private async createOrtWorker(workerUrl: string, signal?: AbortSignal): Promise<Worker> {
     const worker = new Worker(workerUrl, { type: 'module' });
-    await waitForType(worker, 'worker_ready');
-    console.log('[UVR] ORT Worker 就绪');
-    return worker;
+    try {
+      await waitForType(worker, 'worker_ready', signal);
+      console.log('[UVR] ORT Worker 就绪');
+      return worker;
+    } catch (e) {
+      worker.terminate();
+      throw e;
+    }
   }
 
   public destroy() {
     console.log('[UVR] Destroying...');
+    
+    // 1. 立即发出中止信号
+    if (this.abortController) {
+      this.abortController.abort();
+      this.abortController = null;
+    }
+
+    const destroyError = new Error('UVR 实例已销毁');
+
+    // 2. 立即 Reject 所有 Client 中挂起的 Promise
+    this.fftClients.forEach(c => c.terminate(destroyError));
+    this.ifftClients.forEach(c => c.terminate(destroyError));
+    if (this.ortClient) this.ortClient.terminate(destroyError);
+
+    // 3. 严格销毁所有 Worker
     this.fftWorkers.forEach(w => w.terminate());
-    this.fftWorkers = [];
     this.ifftWorkers.forEach(w => w.terminate());
-    this.ifftWorkers = [];
     if (this.ortWorker) this.ortWorker.terminate();
+
+    // 4. 清空引用
+    this.fftWorkers = [];
+    this.ifftWorkers = [];
     this.ortWorker = null;
     this.fftClients = [];
     this.ifftClients = [];
     this.ortClient = null;
-    if (this.audioCtx) {
-      this.audioCtx = null;
-    }
+    this.audioCtx = null;
     this.status = 'UNINITIALIZED';
     this.initPromise = null;
     this.streamParams = null;
@@ -279,6 +302,8 @@ export class UVR {
         controller = c;
         try {
           await this.init();
+
+          if ((this.status as string) === 'UNINITIALIZED') return;
 
           if (!this.audioCtx) {
             this.audioCtx = new OfflineAudioContext(2, 1, 44100);
@@ -332,6 +357,8 @@ export class UVR {
         controller = c;
         try {
           await this.init();
+
+          if ((this.status as string) === 'UNINITIALIZED') return;
 
           let finalChL = chL;
           let finalChR = chR;
@@ -477,7 +504,7 @@ export class UVR {
   ) {
     const ortClient = this.ortClient;
     if (!ortClient || this.fftClients.length === 0 || this.ifftClients.length === 0) {
-      throw new Error('流水线 Worker 未初始化');
+      throw new Error('流水线 Worker 未初始化或已销毁');
     }
 
     const inputLen = chL.length;
@@ -503,6 +530,9 @@ export class UVR {
     const tasks = new Map<number, Promise<{ pos: number; segOutL: Float32Array; segOutR: Float32Array }>>();
 
     const startJob = (segmentIndex: number) => {
+      // 检查是否已销毁
+      if ((this.status as string) === 'UNINITIALIZED' || this.fftClients.length === 0) return;
+
       const pos = positions[segmentIndex];
       const fftClient = this.fftClients[segmentIndex % this.fftClients.length];
       const ifftClient = this.ifftClients[segmentIndex % this.ifftClients.length];
@@ -522,6 +552,11 @@ export class UVR {
 
     state.processedPos = 0;
     for (let i = 0; i < positions.length; i++) {
+      // 检查是否已销毁
+      if ((this.status as string) === 'UNINITIALIZED') {
+        throw new Error('处理中止：实例已销毁');
+      }
+
       const task = tasks.get(i);
       if (!task) {
         controller.error(new Error('流水线任务调度错误'));
@@ -540,8 +575,11 @@ export class UVR {
           this.emitStreamResult(state, safeOutputLen, controller);
         }
       } catch (err: unknown) {
-        controller.error(err instanceof Error ? err : new Error(String(err)));
-        this.status = 'FREE';
+        const error = err instanceof Error ? err : new Error(String(err));
+        controller.error(error);
+        if ((this.status as string) !== 'UNINITIALIZED') {
+          this.status = 'FREE';
+        }
         return;
       }
 
@@ -552,12 +590,14 @@ export class UVR {
     }
 
     const pendingLen = state.inputBufferWritePos - state.outputPos;
-    if (pendingLen > 0) {
+    if (pendingLen > 0 && this.status !== 'UNINITIALIZED') {
       this.emitStreamResult(state, pendingLen, controller);
     }
 
-    controller.close();
-    this.status = 'FREE';
+    if (this.status !== 'UNINITIALIZED') {
+      controller.close();
+      this.status = 'FREE';
+    }
   }
 
   /**
@@ -604,18 +644,30 @@ function getMessageError(payload: unknown): string | null {
   return typeof errorValue === 'string' ? errorValue : null;
 }
 
-function waitForType(worker: Worker, okType: string): Promise<void> {
+function waitForType(worker: Worker, okType: string, signal?: AbortSignal): Promise<void> {
   return new Promise<void>((resolve, reject) => {
+    const onAbort = () => {
+      worker.removeEventListener('message', handler);
+      reject(new Error('操作已中止'));
+    };
+
+    if (signal?.aborted) {
+      return reject(new Error('操作已中止'));
+    }
+    signal?.addEventListener('abort', onAbort, { once: true });
+
     const handler = (e: MessageEvent) => {
       const payload = e.data as unknown;
       const type = getMessageType(payload);
       if (type === okType) {
         worker.removeEventListener('message', handler);
+        signal?.removeEventListener('abort', onAbort);
         resolve();
         return;
       }
       if (type === 'error') {
         worker.removeEventListener('message', handler);
+        signal?.removeEventListener('abort', onAbort);
         reject(new Error(getMessageError(payload) || 'Worker error'));
       }
     };
@@ -624,7 +676,7 @@ function waitForType(worker: Worker, okType: string): Promise<void> {
 }
 
 class FftWorkerClient {
-  private readonly pending = new Map<number, { resolve: (frames: Float32Array) => void; reject: (err: Error) => void }>();
+  private pending = new Map<number, { resolve: (frames: Float32Array) => void; reject: (err: Error) => void }>();
   public constructor(private readonly worker: Worker, private readonly index: number) {
     this.worker.addEventListener('message', (e: MessageEvent) => {
       const payload = e.data as unknown;
@@ -643,20 +695,24 @@ class FftWorkerClient {
       }
       if (type === 'error') {
         const errText = getMessageError(payload) || `FFT Worker ${this.index} 运行错误`;
-        for (const [jobId, p] of this.pending.entries()) {
-          this.pending.delete(jobId);
-          p.reject(new Error(errText));
-        }
+        this.terminate(new Error(errText));
       }
     });
   }
 
-  public async init(params: StreamParams): Promise<void> {
+  public terminate(error: Error) {
+    for (const p of this.pending.values()) {
+      p.reject(error);
+    }
+    this.pending.clear();
+  }
+
+  public async init(params: StreamParams, signal?: AbortSignal): Promise<void> {
     this.worker.postMessage({
       type: 'init',
       data: { dimF: params.dimF, dimT: params.dimT, nfft: params.nfft, hop: params.hop },
     });
-    await waitForType(this.worker, 'inited');
+    await waitForType(this.worker, 'inited', signal);
   }
 
   public compute(jobId: number, segL: Float32Array, segR: Float32Array): Promise<Float32Array> {
@@ -671,7 +727,7 @@ class FftWorkerClient {
 }
 
 class IfftWorkerClient {
-  private readonly pending = new Map<
+  private pending = new Map<
     number,
     { resolve: (out: { segOutL: Float32Array; segOutR: Float32Array }) => void; reject: (err: Error) => void }
   >();
@@ -694,20 +750,24 @@ class IfftWorkerClient {
       }
       if (type === 'error') {
         const errText = getMessageError(payload) || `IFFT Worker ${this.index} 运行错误`;
-        for (const [jobId, p] of this.pending.entries()) {
-          this.pending.delete(jobId);
-          p.reject(new Error(errText));
-        }
+        this.terminate(new Error(errText));
       }
     });
   }
 
-  public async init(params: StreamParams): Promise<void> {
+  public terminate(error: Error) {
+    for (const p of this.pending.values()) {
+      p.reject(error);
+    }
+    this.pending.clear();
+  }
+
+  public async init(params: StreamParams, signal?: AbortSignal): Promise<void> {
     this.worker.postMessage({
       type: 'init',
       data: { dimF: params.dimF, dimT: params.dimT, nfft: params.nfft, hop: params.hop },
     });
-    await waitForType(this.worker, 'inited');
+    await waitForType(this.worker, 'inited', signal);
   }
 
   public compute(jobId: number, spec: Float32Array): Promise<{ segOutL: Float32Array; segOutR: Float32Array }> {
@@ -738,16 +798,23 @@ class OrtWorkerClient {
         return;
       }
       if (type === 'error') {
-        const pending = this.pending;
-        this.pending = null;
-        if (pending) pending.reject(new Error(getMessageError(payload) || 'ORT Worker 运行错误'));
+        this.terminate(new Error(getMessageError(payload) || 'ORT Worker 运行错误'));
       }
     });
   }
 
-  public async preload(modelUrl: string, provider?: Provider): Promise<void> {
+  public terminate(error: Error) {
+    if (this.pending) {
+      this.pending.reject(error);
+      this.pending = null;
+    }
+    // 清空队列
+    this.queue = Promise.resolve();
+  }
+
+  public async preload(modelUrl: string, provider?: Provider, signal?: AbortSignal): Promise<void> {
     this.worker.postMessage({ type: 'preload', data: { modelUrl, provider } });
-    await waitForType(this.worker, 'preloaded');
+    await waitForType(this.worker, 'preloaded', signal);
   }
 
   public run(jobId: number, frames: Float32Array, dimF: number, dimT: number): Promise<Float32Array> {
