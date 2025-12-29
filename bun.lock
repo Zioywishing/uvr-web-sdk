@@ -36,6 +36,7 @@
       "version": "1.0.0",
       "dependencies": {
         "@uvr-web-sdk/fft": "workspace:*",
+        "@uvr-web-sdk/onnx-input-shape-parser": "workspace:*",
         "@uvr-web-sdk/ort-runtime-webgpu": "workspace:*",
       },
       "devDependencies": {
@@ -64,6 +65,17 @@
       "devDependencies": {
         "@types/node": "^20.0.0",
         "typescript": "^5.0.0",
+      },
+    },
+    "packages/onnx-input-shape-parser": {
+      "name": "@uvr-web-sdk/onnx-input-shape-parser",
+      "version": "0.0.0",
+      "devDependencies": {
+        "@types/node": "^25.0.3",
+        "bumpp": "^10.3.2",
+        "tsdown": "^0.18.1",
+        "typescript": "^5.9.3",
+        "vitest": "^4.0.16",
       },
     },
     "packages/ort-runtime-webgpu": {
@@ -249,6 +261,8 @@
     "@uvr-web-sdk/fft": ["@uvr-web-sdk/fft@workspace:packages/fft"],
 
     "@uvr-web-sdk/node": ["@uvr-web-sdk/node@workspace:packages/node"],
+
+    "@uvr-web-sdk/onnx-input-shape-parser": ["@uvr-web-sdk/onnx-input-shape-parser@workspace:packages/onnx-input-shape-parser"],
 
     "@uvr-web-sdk/ort-runtime-webgpu": ["@uvr-web-sdk/ort-runtime-webgpu@workspace:packages/ort-runtime-webgpu"],
 

@@ -1,12 +1,8 @@
 {
-  "name": "@uvr-web-sdk/core",
-  "version": "1.0.0",
-  "dependencies": {
-    "@uvr-web-sdk/fft": "workspace:*",
-    "@uvr-web-sdk/ort-runtime-webgpu": "workspace:*",
-    "@uvr-web-sdk/onnx-input-shape-parser": "workspace:*"
-  },
-  "description": "Core library of UVR SDK",
+  "name": "@uvr-web-sdk/onnx-input-shape-parser",
+  "type": "module",
+  "version": "0.0.0",
+  "description": "A starter for creating a TypeScript package.",
   "author": "Author Name <author.name@mail.com>",
   "license": "MIT",
   "homepage": "https://github.com/author/library#readme",
@@ -19,10 +15,6 @@
   },
   "exports": {
     ".": "./dist/index.mjs",
-    "./worker": "./dist/worker.mjs",
-    "./worker-fft": "./dist/worker-fft.mjs",
-    "./worker-ort": "./dist/worker-ort.mjs",
-    "./worker-ifft": "./dist/worker-ifft.mjs",
     "./package.json": "./package.json"
   },
   "main": "./dist/index.mjs",
@@ -34,9 +26,9 @@
   "scripts": {
     "build": "tsdown",
     "dev": "tsdown --watch",
-    "test": "vitest run",
+    "test": "bun test",
     "typecheck": "tsc --noEmit",
-    "prepublishOnly": "bun run build"
+    "prepublishOnly": "pnpm run build"
   },
   "devDependencies": {
     "@types/node": "^25.0.3",

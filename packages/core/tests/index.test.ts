@@ -2,7 +2,12 @@ import { expect, test } from 'vitest'
 import { UVR } from '../src'
 
 test('UVR instantiation', () => {
-  const uvr = new UVR({ modelUrl: 'model.onnx', workerUrl: 'worker.js' });
+  const uvr = new UVR({
+    modelUrl: 'model.onnx',
+    fftWorkerUrl: 'worker-fft.js',
+    ortWorkerUrl: 'worker-ort.js',
+    ifftWorkerUrl: 'worker-ifft.js'
+  })
   expect(uvr).toBeDefined();
 })
 
@@ -14,17 +19,6 @@ interface WorkerLike {
   postMessage(message: unknown, transfer?: Transferable[]): void
   terminate(): void
 }
-
-type IncomingMessage =
-  | { type: 'stream_start'; data: { modelUrl: string; provider?: string; sampleRate: number } }
-  | { type: 'stream_data'; data: { chL: Float32Array; chR: Float32Array } }
-  | { type: 'stream_end'; data?: never }
-
-type OutgoingMessage =
-  | { type: 'stream_started'; data: { nfft: number; hop: number; chunkSize: number; segStep: number } }
-  | { type: 'stream_result'; data: { chL: Float32Array; chR: Float32Array } }
-  | { type: 'stream_ended' }
-  | { type: 'error'; error: string }
 
 function concatFloat32Arrays(chunks: readonly Float32Array[]): Float32Array {
   let total = 0
@@ -38,128 +32,130 @@ function concatFloat32Arrays(chunks: readonly Float32Array[]): Float32Array {
   return out
 }
 
-class FakeWorker implements WorkerLike {
-  private readonly listeners = new Set<MessageListener>()
-  private readonly receivedL: Float32Array[] = []
-  private readonly receivedR: Float32Array[] = []
-  private readonly deferResults: boolean
+test('init 并行启动模型解析与 Worker 创建', async () => {
+  class FakeInitWorker implements WorkerLike {
+    private readonly listeners = new Set<MessageListener>()
 
-  public constructor(options: { deferResults: boolean }) {
-    this.deferResults = options.deferResults
-  }
-
-  public addEventListener(type: 'message', listener: MessageListener): void {
-    if (type !== 'message') return
-    this.listeners.add(listener)
-  }
-
-  public removeEventListener(type: 'message', listener: MessageListener): void {
-    if (type !== 'message') return
-    this.listeners.delete(listener)
-  }
-
-  public postMessage(message: unknown, _transfer?: Transferable[]): void {
-    const msg = message as IncomingMessage
-    if (msg.type === 'stream_start') {
-      const started: OutgoingMessage = {
-        type: 'stream_started',
-        data: { nfft: 1, hop: 1, chunkSize: 4, segStep: 3 }
-      }
-      this.emit(started)
-      return
+    public addEventListener(type: 'message', listener: MessageListener): void {
+      if (type !== 'message') return
+      this.listeners.add(listener)
     }
-    if (msg.type === 'stream_data') {
-      this.receivedL.push(msg.data.chL)
-      this.receivedR.push(msg.data.chR)
-      return
+
+    public removeEventListener(type: 'message', listener: MessageListener): void {
+      if (type !== 'message') return
+      this.listeners.delete(listener)
     }
-    if (msg.type === 'stream_end') {
-      const emitAll = () => {
-        const allL = concatFloat32Arrays(this.receivedL)
-        const allR = concatFloat32Arrays(this.receivedR)
 
-        const cut = Math.min(3, allL.length)
-        if (cut > 0) {
-          this.emit({ type: 'stream_result', data: { chL: allL.slice(0, cut), chR: allR.slice(0, cut) } })
-        }
-        if (allL.length > cut) {
-          this.emit({ type: 'stream_result', data: { chL: allL.slice(cut), chR: allR.slice(cut) } })
-        }
-        this.emit({ type: 'stream_ended' })
+    public postMessage(message: unknown, _transfer?: Transferable[]): void {
+      const payload = message as { type?: unknown }
+      const type = payload.type
+      if (type === 'init') {
+        queueMicrotask(() => this.emit({ type: 'inited' }))
       }
+      if (type === 'preload') {
+        queueMicrotask(() => this.emit({ type: 'preloaded' }))
+      }
+    }
 
-      if (this.deferResults) {
-        queueMicrotask(emitAll)
-      } else {
-        emitAll()
+    public terminate(): void {
+      this.listeners.clear()
+    }
+
+    private emit(message: { type: string }): void {
+      const event = { data: message } as unknown as MessageEvent
+      for (const listener of this.listeners) {
+        listener(event)
       }
     }
   }
 
-  public terminate(): void {
-    this.listeners.clear()
+  class FakeOfflineAudioContext {
+    public constructor(_numberOfChannels: number, _length: number, _sampleRate: number) {}
+  }
+  ;(globalThis as unknown as { OfflineAudioContext?: unknown }).OfflineAudioContext = FakeOfflineAudioContext
+
+  const uvr = new UVR({
+    modelUrl: 'model.onnx',
+    fftWorkerUrl: 'worker-fft.js',
+    ortWorkerUrl: 'worker-ort.js',
+    ifftWorkerUrl: 'worker-ifft.js',
+    workerCount: 2
+  })
+
+  interface StreamParams {
+    dimF: number
+    dimT: number
+    nfft: number
+    hop: number
+    chunkSize: number
+    segStep: number
+  }
+  interface UVRPrivate {
+    fetchModelAndParseShape(): Promise<StreamParams>
+    createFftWorker(workerUrl: string, index: number): Promise<Worker>
+    createOrtWorker(workerUrl: string): Promise<Worker>
+    createIfftWorker(workerUrl: string, index: number): Promise<Worker>
   }
 
-  private emit(message: OutgoingMessage): void {
-    const event = { data: message } as MessageEvent
-    for (const listener of this.listeners) {
-      listener(event)
-    }
+  const started: string[] = []
+
+  let resolveShape!: (p: StreamParams) => void
+  const shapePromise = new Promise<StreamParams>((resolve) => {
+    resolveShape = resolve
+  })
+
+  let releaseFft!: () => void
+  const fftGate = new Promise<void>((resolve) => {
+    releaseFft = resolve
+  })
+
+  let releaseOrt!: () => void
+  const ortGate = new Promise<void>((resolve) => {
+    releaseOrt = resolve
+  })
+
+  let releaseIfft!: () => void
+  const ifftGate = new Promise<void>((resolve) => {
+    releaseIfft = resolve
+  })
+
+  const priv = uvr as unknown as UVRPrivate
+  priv.fetchModelAndParseShape = () => {
+    started.push('shape')
+    return shapePromise
   }
-}
-
-test('多 worker 分段合并保持顺序与边界', async () => {
-  const sampleCount = 20
-  const chL = new Float32Array(sampleCount)
-  const chR = new Float32Array(sampleCount)
-  for (let i = 0; i < sampleCount; i++) {
-    chL[i] = i
-    chR[i] = 1000 + i
+  priv.createFftWorker = async (_workerUrl: string, index: number) => {
+    started.push(`fft-${index}`)
+    await fftGate
+    return new FakeInitWorker() as unknown as Worker
+  }
+  priv.createOrtWorker = async (_workerUrl: string) => {
+    started.push('ort')
+    await ortGate
+    return new FakeInitWorker() as unknown as Worker
+  }
+  priv.createIfftWorker = async (_workerUrl: string, index: number) => {
+    started.push(`ifft-${index}`)
+    await ifftGate
+    return new FakeInitWorker() as unknown as Worker
   }
 
-  const worker0 = new FakeWorker({ deferResults: true })
-  const worker1 = new FakeWorker({ deferResults: false })
+  const initPromise = uvr.init()
+  await Promise.resolve()
 
-  const uvr = new UVR({ modelUrl: 'model.onnx', workerUrl: 'worker.js', workerCount: 2 })
-  ;(uvr as unknown as { workers: Worker[] }).workers = [
-    worker0 as unknown as Worker,
-    worker1 as unknown as Worker
-  ]
+  expect(started).toContain('shape')
+  expect(started).toContain('ort')
+  expect(started).toContain('fft-0')
+  expect(started).toContain('fft-1')
+  expect(started).toContain('ifft-0')
+  expect(started).toContain('ifft-1')
 
-  const received: Float32Array[] = []
-  const controller = {
-    enqueue(chunk: Float32Array) {
-      received.push(chunk)
-    },
-    close() {},
-    error(err: unknown) {
-      throw err instanceof Error ? err : new Error(String(err))
-    }
-  }
+  releaseFft()
+  releaseOrt()
+  releaseIfft()
+  resolveShape({ dimF: 1, dimT: 1, nfft: 1, hop: 1, chunkSize: 1, segStep: 1 })
 
-  type RunParallelStream = (
-    left: Float32Array,
-    right: Float32Array,
-    sampleRate: number,
-    controller: ReadableStreamDefaultController<Float32Array>
-  ) => Promise<void>
-
-  const runParallelStream = (uvr as unknown as { runParallelStream: RunParallelStream }).runParallelStream
-  await runParallelStream.call(
-    uvr,
-    chL,
-    chR,
-    44100,
-    controller as unknown as ReadableStreamDefaultController<Float32Array>
-  )
-
-  const out = concatFloat32Arrays(received)
-  expect(out.length).toBe(sampleCount * 2)
-
-  for (let i = 0; i < sampleCount; i++) {
-    expect(out[i * 2]).toBe(chL[i])
-    expect(out[i * 2 + 1]).toBe(chR[i])
-  }
+  await initPromise
 })
 
 test('流水线模式输出长度与对齐偏移正确', async () => {
@@ -186,6 +182,7 @@ test('流水线模式输出长度与对齐偏移正确', async () => {
   const hop = 1024
   const chunkSize = hop * (dimT - 1)
   const segExt = chunkSize + nfft
+  const segStep = chunkSize - nfft
   const padSamples = Math.max(0, Math.floor(0.4 * 44100))
 
   interface FftClientLike {
@@ -221,6 +218,7 @@ test('流水线模式输出长度与对齐偏移正确', async () => {
   }
 
   ;(uvr as unknown as { initPromise: Promise<void> | null }).initPromise = Promise.resolve()
+  ;(uvr as unknown as { streamParams: unknown }).streamParams = { dimF, dimT, nfft, hop, chunkSize, segStep }
   ;(uvr as unknown as { fftClients: unknown[] }).fftClients = [fakeFft, fakeFft]
   ;(uvr as unknown as { ifftClients: unknown[] }).ifftClients = [fakeIfft, fakeIfft]
   ;(uvr as unknown as { ortClient: unknown }).ortClient = fakeOrt
