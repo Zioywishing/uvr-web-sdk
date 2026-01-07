@@ -6,32 +6,34 @@ import ortWorkerUrl from '@uvr-web-sdk/core/worker-ort?worker&url';
 import ifftWorkerUrl from '@uvr-web-sdk/core/worker-ifft?worker&url';
 
 // 内置模型列表
-const availableModels = [
-  'UVR-MDX-NET-Inst_HQ_3.onnx',
-  'UVR-MDX-NET-Inst_HQ_3_int8.onnx',
-  'UVR-MDX-NET-Inst_HQ_3_int4.onnx',
-  'UVR-MDX-NET-Inst_HQ_3_fp16.onnx',
-  'UVR-MDX-NET-Inst_3.onnx',
-  'UVR_MDXNET_KARA_2.onnx',
-  'UVR_MDXNET_KARA.onnx',
-  'UVR_MDXNET_3_9662.onnx',
-  'Kim_Inst.onnx'
-];
+// const availableModels = [
+//   'UVR-MDX-NET-Inst_HQ_3.onnx',
+//   'UVR-MDX-NET-Inst_HQ_3_int8.onnx',
+//   'UVR-MDX-NET-Inst_HQ_3_int4.onnx',
+//   'UVR-MDX-NET-Inst_HQ_3_fp16.onnx',
+//   'UVR-MDX-NET-Inst_3.onnx',
+//   'UVR_MDXNET_KARA_2.onnx',
+//   'UVR_MDXNET_KARA.onnx',
+//   'UVR_MDXNET_3_9662.onnx',
+//   'Kim_Inst.onnx'
+// ];
 
-const selectedModel = ref(availableModels[0]);
+// const selectedModel = ref(availableModels[0]);
 const selectedProvider = ref<'wasm' | 'webgpu'>('webgpu');
 const workerCount = ref(3);
 const customModelUrl = ref('');
 const useCustomUrl = ref(false);
+const modelFile = ref<File | null>(null);
+const modelFileUrl = ref('');
 
 const modelUrl = computed(() => {
   if (useCustomUrl.value) {
     return customModelUrl.value;
   }
-  return `/models/${selectedModel.value}`;
+  return modelFileUrl.value;
 });
 
-const status = ref('就绪');
+const status = ref('等待选择模型...');
 const audioFile = ref<File | null>(null);
 const isProcessing = ref(false);
 const progress = ref(0);
@@ -47,28 +49,23 @@ let uvr: UVR | null = null;
 let audioCtx: AudioContext | null = null;
 
 onMounted(async () => {
-  console.log('[Demo] 页面挂载，开始自动初始化...');
-  const start = performance.now();
-  try {
-    uvr = new UVR({
-      modelUrl: modelUrl.value,
-      fftWorkerUrl,
-      ortWorkerUrl,
-      ifftWorkerUrl,
-      provider: selectedProvider.value,
-      workerCount: workerCount.value
-    });
-    status.value = '正在预初始化...';
-    await uvr.init();
-    metrics.value.initTime = performance.now() - start;
-    status.value = '就绪 (已初始化)';
-    console.log('[Demo] 自动初始化完成, 耗时:', metrics.value.initTime.toFixed(2), 'ms');
-  } catch (err: unknown) {
-    console.error('[Demo] 自动初始化失败:', err);
-    const errorMessage = err instanceof Error ? err.message : String(err);
-    status.value = `初始化失败 - ${errorMessage}`;
-  }
+  console.log('[Demo] 页面挂载');
 });
+
+const handleModelFileChange = (event: Event) => {
+  const target = event.target as HTMLInputElement;
+  if (target.files && target.files.length > 0) {
+    const file = target.files[0];
+    modelFile.value = file;
+    
+    // 释放之前的 URL
+    if (modelFileUrl.value) {
+      URL.revokeObjectURL(modelFileUrl.value);
+    }
+    modelFileUrl.value = URL.createObjectURL(file);
+    status.value = `已选择模型: ${file.name}`;
+  }
+};
 
 const handleFileChange = (event: Event) => {
   const target = event.target as HTMLInputElement;
@@ -81,7 +78,7 @@ const handleFileChange = (event: Event) => {
 const useTestAudio = async () => {
   try {
     status.value = '正在加载测试音频...';
-    const response = await fetch('/test.mp3');
+    const response = await fetch('test.mp3');
     const blob = await response.blob();
     const file = new File([blob], 'test.mp3', { type: 'audio/mpeg' });
     audioFile.value = file;
@@ -340,11 +337,10 @@ const handleReinit = async () => {
     <div class="card">
       <div class="form-group">
         <label>选择模型:</label>
-        <select v-model="selectedModel" :disabled="useCustomUrl">
-          <option v-for="model in availableModels" :key="model" :value="model">
-            {{ model }}
-          </option>
-        </select>
+        <p style="margin: 0 0 0.5rem; font-size: 0.9rem; color: #666;">
+          请加载 .onnx 模型文件 (<a href="https://huggingface.co/Blane187/all_public_uvr_models/tree/main" target="_blank">下载地址</a>)
+        </p>
+        <input type="file" @change="handleModelFileChange" accept=".onnx" :disabled="useCustomUrl" />
       </div>
 
       <div class="form-group">

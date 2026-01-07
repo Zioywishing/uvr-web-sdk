@@ -28,7 +28,7 @@
     "dev": "tsdown --watch",
     "test": "bun test",
     "typecheck": "tsc --noEmit",
-    "prepublishOnly": "pnpm run build"
+    "prepublishOnly": "bun run build"
   },
   "devDependencies": {
     "@types/node": "^25.0.3",
